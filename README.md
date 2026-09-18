@@ -98,3 +98,8 @@ POS_PORT=8080 python3 app.py
 ## 📄 License
 
 MIT License. Open for personal and commercial point of sale deployments.
+
+
+## Android APK architecture
+
+The Android build is offline-first. The Capacitor WebView bundles the POS UI locally and stores operational data on-device using native SQLite (`@capacitor-community/sqlite`) with an IndexedDB fallback for browser testing. Core sales do not require a Python server or internet connection. Network-only integrations such as SMS, cloud sync, remote image search and future M-Pesa integrations should call a remote HTTPS backend so API secrets are never bundled in the APK.

@@ -15,3 +15,5 @@ test_pillow_opt/
 capacitor/node_modules/
 capacitor/android/
 capacitor/.gradle/
+api.txt
+capacitor/www/sqlite-bridge.js

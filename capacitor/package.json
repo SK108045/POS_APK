@@ -5,11 +5,16 @@
   "private": true,
   "scripts": {
     "build": "echo 'Frontend ready in www/'",
-    "cap": "cap"
+    "cap": "cap",
+    "build:bridge": "esbuild src/sqlite-bridge.js --bundle --format=iife --platform=browser --outfile=www/sqlite-bridge.js"
   },
   "dependencies": {
     "@capacitor/android": "6.2.0",
     "@capacitor/cli": "6.2.0",
-    "@capacitor/core": "6.2.0"
+    "@capacitor/core": "6.2.0",
+    "@capacitor-community/sqlite": "^6.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   }
 }

@@ -295,221 +295,448 @@ const SHOP_PROFILES = [
   { id: 'bar', name: 'Bar & Nightclub', icon: '🍸', tagline: 'Bar, Lounge & Club POS' }
 ];
 
-const LocalPOS = {
-  get(key, fallback) {
-    try {
-      const v = localStorage.getItem('pos_local_' + key);
-      return v ? JSON.parse(v) : fallback;
-    } catch(e) { return fallback; }
-  },
-  set(key, val) {
-    try { localStorage.setItem('pos_local_' + key, JSON.stringify(val)); } catch(e) {}
-  },
-  switchProfile(btype) {
-    const prof = LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles['retail'];
-    const sample = LOCAL_PROFILES_DATA.sample_data[btype] || LOCAL_PROFILES_DATA.sample_data['retail'];
+const CLOUD_API_BASE = (localStorage.getItem('pos_cloud_api_base') || 'http://3.87.19.244:5000').replace(/\/$/, '');
+const CLOUD_ONLY_PATHS = [
+  '/api/admin/sms/config',
+  '/api/admin/sms/send',
+  '/api/product/image-search',
+  '/api/product/save-image'
+];
 
-    const cats = sample.categories.map((c, i) => ({
+const LocalPOS = {
+  shopKey(name, btype = null) {
+    const type = btype || localStorage.getItem('pos_active_business_type') || 'retail';
+    return `shop:${type}:${name}`;
+  },
+  async get(key, fallback) {
+    try {
+      if (window.OraforgeDBReady) await window.OraforgeDBReady;
+      if (window.OraforgeDB) return await window.OraforgeDB.get(key, fallback);
+    } catch (e) {
+      console.warn('Local DB read fallback:', e);
+    }
+    try {
+      const raw = localStorage.getItem('fallback_' + key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch (e) { return fallback; }
+  },
+  async set(key, value) {
+    try {
+      if (window.OraforgeDBReady) await window.OraforgeDBReady;
+      if (window.OraforgeDB) {
+        await window.OraforgeDB.set(key, value);
+        return;
+      }
+    } catch (e) {
+      console.warn('Local DB write fallback:', e);
+    }
+    localStorage.setItem('fallback_' + key, JSON.stringify(value));
+  },
+  async getShop(name, fallback, btype = null) {
+    return this.get(this.shopKey(name, btype), fallback);
+  },
+  async setShop(name, value, btype = null) {
+    return this.set(this.shopKey(name, btype), value);
+  },
+  async seedShop(btype, force = false) {
+    const prof = LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles.retail;
+    const sample = LOCAL_PROFILES_DATA.sample_data[btype] || LOCAL_PROFILES_DATA.sample_data.retail;
+    const seeded = await this.getShop('seeded', false, btype);
+    if (seeded && !force) return;
+
+    const cats = sample.categories.map((name, i) => ({
       id: i + 1,
-      name: c,
+      name,
       sort_order: i,
       business_type: btype
     }));
-
     const items = sample.items.map((it, i) => ({
       id: i + 1,
-      category_id: (sample.categories.indexOf(it.category) >= 0 ? sample.categories.indexOf(it.category) + 1 : 1),
+      category_id: Math.max(1, sample.categories.indexOf(it.category) + 1),
       name: it.name,
-      price_cents: Math.round((it.price || 0) * 100),
-      cost_cents: Math.round((it.cost || 0) * 100),
-      color: it.color || "#334155",
-      sku: it.sku || `SKU-${i+1}`,
+      price_cents: Math.round(Number(it.price || 0) * 100),
+      wholesale_price_cents: Math.round(Number(it.wholesale_price || 0) * 100),
+      cost_cents: Math.round(Number(it.cost || 0) * 100),
+      color: it.color || '#334155',
+      sku: it.sku || `SKU-${i + 1}`,
       barcode: it.barcode || '',
-      stock_qty: it.stock_qty !== undefined ? it.stock_qty : 50,
-      unit: it.unit || "pcs",
-      image_url: it.image_url || "",
+      stock_qty: Number(it.stock_qty ?? it.stock ?? 0),
+      unit: it.unit || 'pcs',
+      reorder_level: Number(it.reorder_level ?? 5),
+      batch_no: it.batch_no || '',
+      expiry_date: it.expiry_date || '',
+      manufacturer: it.manufacturer || '',
+      strength: it.strength || '',
+      variants_json: it.variants_json || '',
+      decimal_qty_enabled: Number(it.decimal_qty_enabled || 0),
+      image_url: it.image_url || '',
       active: 1
     }));
 
-    this.set('categories', cats);
-    this.set('items', items);
-    this.set('settings', {
-      business_name: prof.name + ' POS',
-      business_tagline: prof.tagline || '',
-      business_type: btype,
-      tax_rate: 16.0,
-      currency: 'KES',
-      receipt_header: 'Welcome to ' + prof.name,
-      receipt_footer: 'Thank you for your business!\n------- END OF RECEIPT -------'
-    });
-    this.set('current_profile', prof);
-    this.set('current_type', btype);
-  },
-  init() {
-    const curType = localStorage.getItem('pos_active_business_type') || this.get('current_type', 'retail');
-    if (!this.get('seeded', false) || this.get('current_type') !== curType) {
-      this.switchProfile(curType);
-      this.set('orders', []);
-      this.set('suppliers', [
-        { id: 1, name: "East African Breweries Ltd", phone: "+254 700 111 000", email: "orders@eabl.co.ke", active: 1 },
-        { id: 2, name: "Coca-Cola Beverages Africa", phone: "+254 722 222 111", email: "supply@ccba.co.ke", active: 1 },
-        { id: 3, name: "Local Wholesale Distributors", phone: "+254 733 444 000", email: "sales@lwd.co.ke", active: 1 }
-      ]);
-      this.set('customers', [
-        { id: 1, name: "Walk-In Customer", phone: "+254 700 000 000" }
-      ]);
-      this.set('seeded', true);
+    await this.setShop('categories', cats, btype);
+    await this.setShop('items', items, btype);
+    if (force || !(await this.getShop('settings', null, btype))) {
+      await this.setShop('settings', {
+        business_name: prof.name + ' POS',
+        business_tagline: prof.tagline || '',
+        business_type: btype,
+        tax_rate: 16.0,
+        currency: 'KES',
+        receipt_header: 'Welcome to ' + prof.name,
+        receipt_footer: 'Thank you for your business!\n------- END OF RECEIPT -------'
+      }, btype);
     }
+    if (!(await this.getShop('orders', null, btype))) await this.setShop('orders', [], btype);
+    if (!(await this.getShop('suppliers', null, btype))) {
+      await this.setShop('suppliers', [
+        { id: 1, name: 'Local Wholesale Distributor', phone: '', email: '', active: 1 }
+      ], btype);
+    }
+    if (!(await this.getShop('customers', null, btype))) {
+      await this.setShop('customers', [{ id: 1, name: 'Walk-In Customer', phone: '' }], btype);
+    }
+    await this.setShop('seeded', true, btype);
   },
-  handle(path, options = {}) {
-    this.init();
-    const cleanPath = path.split('?')[0];
+  async switchProfile(btype) {
+    const type = LOCAL_PROFILES_DATA.profiles[btype] ? btype : 'retail';
+    localStorage.setItem('pos_active_business_type', type);
+    await this.seedShop(type, false);
+    return type;
+  },
+  async init() {
+    const type = localStorage.getItem('pos_active_business_type') || 'retail';
+    await this.seedShop(type, false);
+    return type;
+  },
+  recalc(order) {
+    order.subtotal_cents = (order.items || []).reduce((sum, it) => sum + Number(it.line_total_cents || 0), 0);
+    order.tax_cents = 0;
+    order.total_cents = order.subtotal_cents;
+    order.updated_at = Math.floor(Date.now() / 1000);
+    return order;
+  },
+  nextId(rows) {
+    return (rows || []).reduce((m, row) => Math.max(m, Number(row.id || 0)), 0) + 1;
+  },
+  async saveOrders(orders, btype) {
+    await this.setShop('orders', orders, btype);
+  },
+  async handle(path, options = {}) {
+    const btype = await this.init();
+    const url = new URL(path, 'https://local.pos');
+    const cleanPath = url.pathname;
     const method = (options.method || 'GET').toUpperCase();
     const body = options.body ? (typeof options.body === 'string' ? JSON.parse(options.body) : options.body) : {};
-    const btype = this.get('current_type', 'retail');
-    const prof = this.get('current_profile', LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles['retail']);
+    const prof = LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles.retail;
 
     if (cleanPath === '/api/bootstrap') {
-      const cats = this.get('categories', []);
-      const items = this.get('items', []);
+      const cats = await this.getShop('categories', [], btype);
+      const items = await this.getShop('items', [], btype);
+      const settings = await this.getShop('settings', {}, btype);
+      const low = items.filter(i => Number(i.stock_qty || 0) <= Number(i.reorder_level || 5)).length;
       return {
-        user: { id: 1, username: 'terminal', full_name: 'POS Terminal', role: 'cashier' },
-        settings: this.get('settings', {}),
+        user: { id: 1, username: 'terminal', full_name: 'POS Terminal', role: 'cashier', business_type: btype },
+        settings,
         profile: prof,
         profiles: LOCAL_PROFILES_DATA.profiles,
         capabilities: prof.capabilities || {},
-        employees: [{ id: 1, name: "POS Terminal" }, { id: 2, name: "The Owner" }],
-        menu: { categories: cats, items: items },
-        suppliers: this.get('suppliers', []),
-        tables: [{ id: 1, name: "Counter 1", seats: 4 }, { id: 2, name: "Counter 2", seats: 4 }],
-        alerts: { expiry: 0, low_stock: 0 }
+        employees: [{ id: 1, name: 'POS Terminal' }, { id: 2, name: 'The Owner' }],
+        menu: { categories: cats, items },
+        tables: [{ id: 1, name: 'Counter 1', seats: 4 }, { id: 2, name: 'Counter 2', seats: 4 }],
+        alerts: { expiry: 0, low_stock: low }
       };
     }
 
     if (cleanPath === '/api/orders' && method === 'POST') {
-      const orders = this.get('orders', []);
+      const orders = await this.getShop('orders', [], btype);
       const now = Math.floor(Date.now() / 1000);
-      const ticketNo = 'R' + now + String(orders.length + 1).padStart(3, '0');
-      let subtotal = 0;
-      const orderItems = (body.items || []).map((it, idx) => {
-        const lineTotal = (it.price_cents || 0) * (it.qty || 1);
-        subtotal += lineTotal;
-        return {
-          id: idx + 1,
-          menu_item_id: it.menu_item_id,
-          name: it.name,
-          qty: it.qty,
-          unit_price_cents: it.price_cents,
-          line_total_cents: lineTotal,
-          note: it.note || ''
-        };
-      });
       const order = {
-        id: orders.length + 1,
-        ticket_no: ticketNo,
-        order_type: body.order_type || 'walk-in',
+        id: this.nextId(orders),
+        ticket_no: `R${String(now).slice(-6)}-${String(orders.length + 1).padStart(3, '0')}`,
+        business_type: btype,
+        order_type: body.order_type || prof.order_type_default || 'walk-in',
         customer_name: body.customer_name || '',
-        status: 'open',
-        subtotal_cents: subtotal,
-        tax_cents: 0,
-        total_cents: subtotal,
-        total: (subtotal / 100).toFixed(2),
-        paid_cents: 0,
-        created_at: now,
-        updated_at: now,
-        items: orderItems
+        table_id: body.table_id || null,
+        table_name: body.table_id ? `Counter ${body.table_id}` : '',
+        employee_id: Number(body.employee_id || 1),
+        employee_name: Number(body.employee_id || 1) === 2 ? 'The Owner' : 'POS Terminal',
+        pricing_tier: body.pricing_tier || 'retail',
+        is_quote: body.is_quote ? 1 : 0,
+        notes: body.notes || '',
+        status: 'open', subtotal_cents: 0, tax_cents: 0, total_cents: 0,
+        paid_cents: 0, payment_method: '', payment_ref: '',
+        created_at: now, updated_at: now, paid_at: null, items: []
       };
       orders.unshift(order);
-      this.set('orders', orders);
-      return { order };
+      await this.saveOrders(orders, btype);
+      return order;
     }
 
-    if (cleanPath === '/api/pay' && method === 'POST') {
-      const orders = this.get('orders', []);
+    if (cleanPath === '/api/order/add' && method === 'POST') {
+      const orders = await this.getShop('orders', [], btype);
+      const products = await this.getShop('items', [], btype);
       const order = orders.find(o => o.id === Number(body.order_id));
-      if (order) {
-        order.status = 'paid';
-        order.paid_at = Math.floor(Date.now() / 1000);
-        order.payment_method = body.method || 'cash';
-        order.payment_ref = body.ref || ('TXN-' + Math.floor(Math.random() * 900000 + 100000));
-        order.paid_cents = order.total_cents;
-        this.set('orders', orders);
-        const items = this.get('items', []);
-        (order.items || []).forEach(oi => {
-          const item = items.find(i => i.id === oi.menu_item_id);
-          if (item && item.stock_qty) item.stock_qty = Math.max(0, item.stock_qty - oi.qty);
-        });
-        this.set('items', items);
-        return { success: true, order };
+      const product = products.find(i => i.id === Number(body.menu_item_id));
+      if (!order) throw new Error('Sale not found');
+      if (!product) throw new Error('Product not found');
+      const qty = Number(body.qty || 1);
+      const price = body.pricing_tier === 'wholesale' && Number(product.wholesale_price_cents || 0) > 0
+        ? Number(product.wholesale_price_cents)
+        : Number(body.unit_price_cents || product.price_cents || 0);
+      const variant = body.variant_info || '';
+      const note = body.note || '';
+      let row = (order.items || []).find(i => i.menu_item_id === product.id && (i.variant_info || '') === variant && (i.note || '') === note);
+      if (row) {
+        row.qty = Number(row.qty || 0) + qty;
+        row.unit_price_cents = price;
+        row.line_total_cents = Math.round(row.qty * price);
+      } else {
+        row = {
+          id: this.nextId(order.items || []),
+          menu_item_id: product.id,
+          name: product.name,
+          qty,
+          unit_price_cents: price,
+          line_total_cents: Math.round(qty * price),
+          cost_cents: Number(product.cost_cents || 0),
+          variant_info: variant,
+          note,
+          batch_no: body.batch_no || product.batch_no || ''
+        };
+        order.items.push(row);
       }
-      return { success: true };
+      this.recalc(order);
+      await this.saveOrders(orders, btype);
+      return order;
     }
 
-    if (cleanPath === '/api/orders') {
-      return { orders: this.get('orders', []) };
+    if (cleanPath === '/api/order/qty' && method === 'POST') {
+      const orders = await this.getShop('orders', [], btype);
+      let found = null;
+      for (const order of orders) {
+        const idx = (order.items || []).findIndex(i => i.id === Number(body.item_id));
+        if (idx < 0) continue;
+        if (Number(body.qty) <= 0) order.items.splice(idx, 1);
+        else {
+          const row = order.items[idx];
+          row.qty = Number(body.qty);
+          row.line_total_cents = Math.round(row.qty * Number(row.unit_price_cents || 0));
+        }
+        this.recalc(order);
+        found = order;
+        break;
+      }
+      if (!found) throw new Error('Cart item not found');
+      await this.saveOrders(orders, btype);
+      return found;
     }
 
-    if (cleanPath === '/api/sales') {
-      const orders = this.get('orders', []).filter(o => o.status === 'paid');
-      const totalCents = orders.reduce((sum, o) => sum + (o.total_cents || 0), 0);
-      return {
-        period: 'today',
-        total_sales_cents: totalCents,
-        order_count: orders.length,
-        orders: orders
-      };
+    if (cleanPath === '/api/order/status' && method === 'POST') {
+      const orders = await this.getShop('orders', [], btype);
+      const order = orders.find(o => o.id === Number(body.order_id));
+      if (!order) throw new Error('Sale not found');
+      order.status = body.status || order.status;
+      order.updated_at = Math.floor(Date.now() / 1000);
+      await this.saveOrders(orders, btype);
+      return order;
     }
 
-    if (cleanPath === '/api/suppliers') {
-      return { suppliers: this.get('suppliers', []) };
+    if (cleanPath === '/api/order/convert-quote' && method === 'POST') {
+      const orders = await this.getShop('orders', [], btype);
+      const order = orders.find(o => o.id === Number(body.order_id));
+      if (!order) throw new Error('Quotation not found');
+      order.is_quote = 0;
+      order.status = 'open';
+      order.order_type = 'walk-in';
+      this.recalc(order);
+      await this.saveOrders(orders, btype);
+      return order;
     }
 
-    if (cleanPath === '/api/customers') {
-      return { customers: this.get('customers', []) };
+    if (cleanPath === '/api/order/pay' && method === 'POST') {
+      const orders = await this.getShop('orders', [], btype);
+      const products = await this.getShop('items', [], btype);
+      const customers = await this.getShop('customers', [], btype);
+      const order = orders.find(o => o.id === Number(body.order_id));
+      if (!order) throw new Error('Sale not found');
+      if (order.status !== 'paid') {
+        for (const oi of order.items || []) {
+          const product = products.find(p => p.id === oi.menu_item_id);
+          if (product) product.stock_qty = Math.max(0, Number(product.stock_qty || 0) - Number(oi.qty || 0));
+        }
+      }
+      order.status = 'paid';
+      order.payment_method = body.payment_method || 'cash';
+      order.payment_ref = body.payment_ref || (order.payment_method === 'cash' ? 'CASH' : `TXN-${Date.now()}`);
+      order.paid_cents = order.total_cents;
+      order.paid_at = Math.floor(Date.now() / 1000);
+      order.updated_at = order.paid_at;
+      const phone = String(body.customer_phone || '').trim();
+      if (phone && !customers.some(c => String(c.phone || '').replace(/\D/g, '') === phone.replace(/\D/g, ''))) {
+        customers.push({ id: this.nextId(customers), name: order.customer_name || phone, phone, email: '', notes: '' });
+      }
+      await this.saveOrders(orders, btype);
+      await this.setShop('items', products, btype);
+      await this.setShop('customers', customers, btype);
+      return order;
+    }
+
+    if (cleanPath === '/api/orders' && method === 'GET') {
+      const orders = await this.getShop('orders', [], btype);
+      const status = url.searchParams.get('status');
+      return status ? orders.filter(o => o.status === status) : orders;
+    }
+
+    if (cleanPath === '/api/order' && method === 'GET') {
+      const orders = await this.getShop('orders', [], btype);
+      return orders.find(o => o.id === Number(url.searchParams.get('id'))) || {};
+    }
+
+    if (cleanPath === '/api/payments') {
+      const q = (url.searchParams.get('q') || '').toLowerCase();
+      const orders = (await this.getShop('orders', [], btype)).filter(o => o.status === 'open' || o.status === 'sent');
+      return q ? orders.filter(o => `${o.ticket_no} ${o.customer_name} ${o.employee_name}`.toLowerCase().includes(q)) : orders;
+    }
+
+    if (cleanPath === '/api/suppliers') return await this.getShop('suppliers', [], btype);
+    if (cleanPath === '/api/customers') return await this.getShop('customers', [], btype);
+
+    if (cleanPath === '/api/admin/supplier' && method === 'POST') {
+      const suppliers = await this.getShop('suppliers', [], btype);
+      let supplier = body.id ? suppliers.find(s => s.id === Number(body.id)) : null;
+      if (!supplier) {
+        supplier = { id: this.nextId(suppliers) };
+        suppliers.push(supplier);
+      }
+      Object.assign(supplier, { name: body.name || supplier.name || 'Supplier', phone: body.phone || '', email: body.email || '', active: Number(body.active ?? 1) });
+      await this.setShop('suppliers', suppliers, btype);
+      return supplier;
+    }
+
+    if (cleanPath === '/api/supplier/detail') {
+      const suppliers = await this.getShop('suppliers', [], btype);
+      const products = await this.getShop('items', [], btype);
+      const supplier = suppliers.find(s => s.id === Number(url.searchParams.get('id')));
+      if (!supplier) throw new Error('Supplier not found');
+      return { ...supplier, total_purchases: 0, products: products.filter(p => Number(p.supplier_id || 0) === supplier.id) };
     }
 
     if (cleanPath === '/api/settings' && method === 'POST') {
-      const settings = { ...this.get('settings', {}), ...body };
-      this.set('settings', settings);
-      return { settings, profile: prof };
+      const current = await this.getShop('settings', {}, btype);
+      const settings = { ...current, ...body, business_type: btype };
+      await this.setShop('settings', settings, btype);
+      return { settings, profile: prof, capabilities: prof.capabilities || {} };
+    }
+
+    if (cleanPath === '/api/seed-samples' && method === 'POST') {
+      await this.seedShop(btype, true);
+      return { ok: true, menu: { categories: await this.getShop('categories', [], btype), items: await this.getShop('items', [], btype) } };
+    }
+
+    if (cleanPath === '/api/menu/item' && method === 'POST') {
+      const categories = await this.getShop('categories', [], btype);
+      const items = await this.getShop('items', [], btype);
+      let item = body.id ? items.find(i => i.id === Number(body.id)) : null;
+      if (!item) {
+        item = { id: this.nextId(items), active: 1 };
+        items.push(item);
+      }
+      Object.assign(item, {
+        category_id: Number(body.category_id || item.category_id || 1),
+        name: body.name || item.name || 'Product',
+        sku: body.sku || '', barcode: body.barcode || '', unit: body.unit || 'pcs',
+        stock_qty: Number(body.stock_qty ?? item.stock_qty ?? 0),
+        reorder_level: Number(body.reorder_level ?? item.reorder_level ?? 5),
+        cost_cents: Math.round(Number(body.cost || 0) * 100),
+        price_cents: Math.round(Number(body.price || 0) * 100),
+        wholesale_price_cents: Math.round(Number(body.wholesale_price || 0) * 100),
+        batch_no: body.batch_no || '', expiry_date: body.expiry_date || '',
+        manufacturer: body.manufacturer || '', strength: body.strength || '',
+        variants_json: body.variants_json || '', decimal_qty_enabled: body.decimal_qty_enabled ? 1 : 0,
+        image_url: body.image_base64 || body.image_url || item.image_url || '', color: body.color || item.color || '#334155'
+      });
+      await this.setShop('items', items, btype);
+      return { categories, items };
+    }
+
+    if (cleanPath === '/api/menu/item' && method === 'DELETE') {
+      const id = Number(url.searchParams.get('id'));
+      const orders = await this.getShop('orders', [], btype);
+      if (orders.some(o => (o.items || []).some(i => i.menu_item_id === id))) return { error: 'Cannot delete product with sales history.' };
+      const categories = await this.getShop('categories', [], btype);
+      const items = (await this.getShop('items', [], btype)).filter(i => i.id !== id);
+      await this.setShop('items', items, btype);
+      return { categories, items };
+    }
+
+    if (cleanPath === '/api/stock') return await this.getShop('items', [], btype);
+    if (cleanPath === '/api/stock/adjust' && method === 'POST') {
+      const items = await this.getShop('items', [], btype);
+      const item = items.find(i => i.id === Number(body.product_id));
+      if (!item) throw new Error('Product not found');
+      item.stock_qty = Math.max(0, Number(item.stock_qty || 0) + Number(body.qty_change || 0));
+      await this.setShop('items', items, btype);
+      return { ok: true, item };
     }
 
     if (cleanPath === '/api/reports') {
-      const orders = this.get('orders', []).filter(o => o.status === 'paid');
-      const totalSales = orders.reduce((s, o) => s + (o.total_cents || 0), 0);
+      const period = url.searchParams.get('period') || 'today';
+      const now = new Date();
+      let start = new Date(now);
+      if (period === 'yesterday') { start.setDate(start.getDate() - 1); start.setHours(0,0,0,0); }
+      else if (period === 'week') { start.setDate(start.getDate() - 6); start.setHours(0,0,0,0); }
+      else if (period === 'month') { start.setDate(start.getDate() - 29); start.setHours(0,0,0,0); }
+      else start.setHours(0,0,0,0);
+      let end = now;
+      if (period === 'yesterday') { end = new Date(start); end.setDate(end.getDate() + 1); }
+      const startTs = Math.floor(start.getTime()/1000), endTs = Math.floor(end.getTime()/1000) + 1;
+      const orders = (await this.getShop('orders', [], btype)).filter(o => o.status === 'paid' && Number(o.paid_at || o.updated_at || 0) >= startTs && Number(o.paid_at || o.updated_at || 0) < endTs);
+      const products = await this.getShop('items', [], btype);
+      let sales = 0, costs = 0;
+      const paymentMap = new Map(), top = new Map();
+      for (const o of orders) {
+        sales += Number(o.total_cents || 0);
+        const pm = o.payment_method || 'cash';
+        paymentMap.set(pm, (paymentMap.get(pm) || 0) + Number(o.total_cents || 0));
+        for (const it of o.items || []) {
+          costs += Number(it.cost_cents || 0) * Number(it.qty || 0);
+          const cur = top.get(it.menu_item_id) || { name: it.name, qty: 0, sales: 0, current_stock: 0 };
+          cur.qty += Number(it.qty || 0); cur.sales += Number(it.line_total_cents || 0);
+          cur.current_stock = Number(products.find(p => p.id === it.menu_item_id)?.stock_qty || 0);
+          top.set(it.menu_item_id, cur);
+        }
+      }
+      const inventoryValue = products.reduce((s,p) => s + Number(p.stock_qty || 0) * Number(p.cost_cents || 0), 0);
+      const potentialProfit = products.reduce((s,p) => s + Number(p.stock_qty || 0) * Math.max(0, Number(p.price_cents || 0) - Number(p.cost_cents || 0)), 0);
       return {
-        totals: {
-          sales_today: totalSales,
-          paid_today: orders.length,
-          unpaid_orders: 0,
-          unpaid_total: 0
-        },
-        counts: { active_items: this.get('items', []).length },
-        by_method: [],
-        top_items: []
+        totals: { sales, costs, orders: orders.length },
+        payments: [...paymentMap.entries()].map(([method, amount]) => ({ method, amount, transactions: orders.filter(o => (o.payment_method || 'cash') === method).length })),
+        top_items: [...top.values()].sort((a,b) => b.sales - a.sales).slice(0, 15),
+        stock: { inventory_value: inventoryValue, potential_profit: potentialProfit },
+        period,
+        range: { start: startTs, end: endTs, label: period === 'today' ? 'Today' : period === 'yesterday' ? 'Yesterday' : period === 'week' ? 'Last 7 days' : 'Last 30 days' }
       };
     }
 
-    return {};
+    throw new Error(`Offline feature not implemented yet: ${cleanPath}`);
   }
 };
 
 async function api(path, options = {}) {
-  const init = { headers: { 'Content-Type': 'application/json' }, ...options };
-  if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
-
-  try {
-    const res = await fetch(path, init);
-    if (res.ok) return await res.json();
-    if (res.status === 401 || res.status === 403) {
-      return LocalPOS.handle(path, options);
-    }
-  } catch (err) {
-    // Standalone local offline mode in APK
-    return LocalPOS.handle(path, options);
+  const cloudOnly = CLOUD_ONLY_PATHS.some(prefix => path.startsWith(prefix));
+  if (cloudOnly) {
+    if (!navigator.onLine) throw new Error('This feature needs an internet connection.');
+    const init = { headers: { 'Content-Type': 'application/json' }, credentials: 'include', ...options };
+    if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+    const res = await fetch(CLOUD_API_BASE + path, init);
+    let payload = {};
+    try { payload = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(payload.error || payload.message || `Online service failed (${res.status})`);
+    return payload;
   }
   return LocalPOS.handle(path, options);
 }
+
 
 async function bootstrap() {
   const data = await api('/api/bootstrap');
@@ -871,176 +1098,90 @@ function showBarcodeModal(mode = 'pos', onScan = null) {
 // ── POS Layout ────────────────────────────────────────────────────────────────
 function posLayout() {
   const root = qs('[data-page="pos"]');
+  document.body.classList.remove('mobile-cart-open');
   const itemLabel = state.profile?.item_label || 'Products';
   const orderTypes = (state.profile?.order_types && state.profile.order_types.length)
     ? state.profile.order_types
     : ['walk-in', 'quote', 'layaway'];
 
   root.innerHTML = `
+    <div class="mobile-cart-backdrop" id="mobileCartBackdrop" aria-hidden="true"></div>
     <section class="menu-side">
-      <div class="pos-head" style="flex-wrap:wrap; gap:8px;">
-        <h2>${itemLabel}</h2>
-        
-        <div style="display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap;">
-          ${hasCap('wholesale_pricing') ? `
-            <button type="button" id="tierToggleBtn" class="tier-toggle-btn ${state.pricingTier === 'wholesale' ? 'active' : ''}">
-              ${state.pricingTier === 'wholesale' ? '⚡ Wholesale Pricing' : '🏷️ Retail Pricing'}
-            </button>
-          ` : ''}
-
-          ${hasCap('tables') ? `
-            <select id="tableSelect" class="field" style="padding:6px 10px; font-size:13px; max-width:140px;">
-              <option value="">-- Table / Tab --</option>
-              ${state.tables.map(t => `<option value="${t.id}" ${state.selectedTableId == t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
-            </select>
-          ` : ''}
-
-          ${hasCap('waiters') ? `
-            <select id="waiterSelect" class="field" style="padding:6px 10px; font-size:13px; max-width:140px;">
-              <option value="">-- Staff / Waiter --</option>
-              ${state.employees.map(e => `<option value="${e.id}" ${state.selectedEmployeeId == e.id ? 'selected' : ''}>${e.name}</option>`).join('')}
-            </select>
-          ` : ''}
-
-          <select id="orderType" class="field" style="padding:6px 10px; font-size:13px;">
-            ${orderTypes.map(t => {
-              const label = t.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-              return `<option value="${t}">${label}</option>`;
-            }).join('')}
-          </select>
+      <div class="pos-head mobile-pos-head">
+        <div class="pos-title-block">
+          <span class="pos-kicker">Quick sale</span>
+          <h2>${itemLabel}</h2>
+          <small>Tap a product to add it instantly</small>
+        </div>
+        <div class="pos-control-strip">
+          ${hasCap('wholesale_pricing') ? `<button type="button" id="tierToggleBtn" class="tier-toggle-btn ${state.pricingTier === 'wholesale' ? 'active' : ''}">${state.pricingTier === 'wholesale' ? '⚡ Wholesale' : '🏷️ Retail'}</button>` : ''}
+          ${hasCap('tables') ? `<select id="tableSelect" class="field"><option value="">Table / Tab</option>${state.tables.map(t => `<option value="${t.id}" ${state.selectedTableId == t.id ? 'selected' : ''}>${t.name}</option>`).join('')}</select>` : ''}
+          ${hasCap('waiters') ? `<select id="waiterSelect" class="field"><option value="">Staff / Waiter</option>${state.employees.map(e => `<option value="${e.id}" ${state.selectedEmployeeId == e.id ? 'selected' : ''}>${e.name}</option>`).join('')}</select>` : ''}
+          <select id="orderType" class="field">${orderTypes.map(t => `<option value="${t}">${t.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>`).join('')}</select>
         </div>
       </div>
-
-      ${hasCap('expiry_alerts') && state.alerts.expiry > 0 ? `
-        <div class="alert-banner warning" style="margin: 8px 16px; padding: 8px 14px; background: #fef2f2; border: 1px solid #f87171; border-radius: 8px; font-size: 13px; color: #991b1b; display: flex; align-items: center; justify-content: space-between;">
-          <span>⚠️ <strong>Expiry Alert:</strong> ${state.alerts.expiry} item(s) expired or expiring within 30 days.</span>
-          <a href="/products" class="nav-link" style="color:#b91c1c; font-weight:700; text-decoration:underline;">View Products</a>
-        </div>
-      ` : ''}
-
-      ${hasCap('reorder_levels') && state.alerts.low_stock > 0 ? `
-        <div class="alert-banner info" style="margin: 8px 16px; padding: 8px 14px; background: #fffbeb; border: 1px solid #fbbf24; border-radius: 8px; font-size: 13px; color: #92400e; display: flex; align-items: center; justify-content: space-between;">
-          <span>📦 <strong>Reorder Alert:</strong> ${state.alerts.low_stock} product(s) at or below reorder level.</span>
-          <a href="/stock" class="nav-link" style="color:#b45309; font-weight:700; text-decoration:underline;">Check Stock</a>
-        </div>
-      ` : ''}
-
-      <div class="sku-search-wrap" style="display:flex; gap:8px; align-items:center;">
-        <div class="sku-search-inner" style="flex:1;">
+      <div class="sku-search-wrap mobile-search-row">
+        <div class="sku-search-inner">
           <span class="sku-search-icon">&#128269;</span>
           <input class="sku-search-input" id="skuSearch" placeholder="${hasCap('barcode') ? 'Search name, SKU or scan barcode…' : 'Search by name or SKU…'}" autocomplete="off" autocorrect="off">
           <button class="sku-search-clear" id="skuClear" title="Clear">&#215;</button>
         </div>
-        <button type="button" class="barcode-scan-btn" id="posBarcodeScanBtn" title="Scan Barcode to Add to Cart">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14"/>
-          </svg>
-          <span>Scan Barcode</span>
-        </button>
+        <button type="button" class="barcode-scan-btn" id="posBarcodeScanBtn" title="Scan Barcode"><span class="barcode-glyph">▥</span><span>Scan</span></button>
       </div>
       <div class="tabs" id="catTabs"></div>
       <div class="item-grid" id="itemGrid"></div>
     </section>
-    <aside class="ticket-side">
+    <aside class="ticket-side mobile-ticket-drawer" id="mobileTicketDrawer">
       <div class="ticket-head">
-        <div>
-          <h2>${hasCap('tables') ? 'Ticket / Tab' : 'Sale'}</h2>
-          <small>${state.profile?.name || 'POS'}</small>
-        </div>
-        <div style="font-weight: 700; font-size: 15px; color: var(--ink);">
-          ${selectedEmployeeName() || state.user?.username || 'Staff'}
-        </div>
+        <div><h2>${hasCap('tables') ? 'Ticket / Tab' : 'Sale'}</h2><small>${state.profile?.name || 'POS'}</small></div>
+        <div class="ticket-staff">${selectedEmployeeName() || state.user?.username || 'Staff'}</div>
+        <button type="button" class="mobile-cart-close" id="mobileCartClose" aria-label="Close cart">×</button>
       </div>
       <div class="ticket-list" id="ticketList"></div>
       <div class="ticket-foot" id="ticketFoot"></div>
     </aside>
-  `;
+    <div class="mobile-cart-bar">
+      <button type="button" class="mobile-cart-summary" id="mobileCartBar" aria-label="Open sale cart">
+        <span class="mobile-cart-items"><span class="mobile-cart-icon">🛒</span><strong id="mobileCartCount">0</strong><span>items</span></span>
+        <strong class="mobile-cart-total" id="mobileCartTotal">KES 0.00</strong>
+        <span class="mobile-cart-action">View cart ↑</span>
+      </button>
+    </div>`;
 
   qs('#orderType')?.addEventListener('change', ensureOrder);
-  
   qs('#tableSelect')?.addEventListener('change', e => {
     state.selectedTableId = e.target.value ? Number(e.target.value) : null;
-    if (state.order) {
-      state.order.table_id = state.selectedTableId;
-      const found = state.tables.find(t => t.id === state.selectedTableId);
-      state.order.table_name = found ? found.name : '';
-      renderTicket();
-    }
+    if (state.order) { state.order.table_id = state.selectedTableId; state.order.table_name = state.tables.find(t => t.id === state.selectedTableId)?.name || ''; renderTicket(); }
   });
-
   qs('#waiterSelect')?.addEventListener('change', e => {
     state.selectedEmployeeId = e.target.value ? Number(e.target.value) : null;
-    if (state.order) {
-      state.order.employee_id = state.selectedEmployeeId;
-      state.order.employee_name = selectedEmployeeName();
-      renderTicket();
-    }
+    if (state.order) { state.order.employee_id = state.selectedEmployeeId; state.order.employee_name = selectedEmployeeName(); renderTicket(); }
   });
-
   qs('#tierToggleBtn')?.addEventListener('click', () => {
     state.pricingTier = state.pricingTier === 'wholesale' ? 'retail' : 'wholesale';
     qs('#tierToggleBtn').classList.toggle('active', state.pricingTier === 'wholesale');
-    qs('#tierToggleBtn').textContent = state.pricingTier === 'wholesale' ? '⚡ Wholesale Pricing' : '🏷️ Retail Pricing';
-    toast(`Switched to ${state.pricingTier.toUpperCase()} pricing`, 'info');
+    qs('#tierToggleBtn').textContent = state.pricingTier === 'wholesale' ? '⚡ Wholesale' : '🏷️ Retail';
     renderItems();
-    if (state.order) {
-      state.order.pricing_tier = state.pricingTier;
-      renderTicket();
-    }
   });
-
-  qs('#posBarcodeScanBtn')?.addEventListener('click', () => {
-    showBarcodeModal('pos');
-  });
+  qs('#posBarcodeScanBtn')?.addEventListener('click', () => showBarcodeModal('pos'));
+  qs('#mobileCartBar')?.addEventListener('click', () => setMobileCartOpen(true));
+  qs('#mobileCartBackdrop')?.addEventListener('click', () => setMobileCartOpen(false));
+  qs('#mobileCartClose')?.addEventListener('click', () => setMobileCartOpen(false));
 
   const skuInput = qs('#skuSearch');
-  skuInput.addEventListener('input', () => {
-    state.searchQuery = skuInput.value.trim().toLowerCase();
-    renderItems();
-  });
-  qs('#skuClear').addEventListener('click', () => {
-    skuInput.value = '';
-    state.searchQuery = '';
-    renderItems();
-    skuInput.focus();
-  });
-
+  skuInput.addEventListener('input', () => { state.searchQuery = skuInput.value.trim().toLowerCase(); renderItems(); });
+  qs('#skuClear').addEventListener('click', () => { skuInput.value = ''; state.searchQuery = ''; renderItems(); skuInput.focus(); });
   skuInput.addEventListener('keydown', async e => {
-    if (e.key === 'Enter') {
-      const q = skuInput.value.trim().toLowerCase();
-      if (!q) return;
-      const match = (state.items || []).find(i =>
-        (i.barcode && i.barcode.trim().toLowerCase() === q) ||
-        (i.sku && i.sku.trim().toLowerCase() === q)
-      );
-      if (match) {
-        if (hasCap('variants') && match.variants_json) {
-          showVariantModal(match);
-        } else {
-          const existing = state.order?.items?.find(i => i.menu_item_id === match.id);
-          const existingQty = existing ? existing.qty : 0;
-          if (match.stock_qty !== undefined && (1 + existingQty) > match.stock_qty) {
-            playBeep('error');
-            toast(`Cannot add "${match.name}". Only ${match.stock_qty} left in stock.`, 'error');
-            return;
-          }
-          await addItemWithQty(match.id, 1);
-          playBeep('success');
-          toast(`✓ Added "${match.name}" to cart!`, 'success');
-        }
-        skuInput.value = '';
-        state.searchQuery = '';
-        renderItems();
-      } else {
-        playBeep('error');
-        toast(`⚠️ Barcode / SKU "${skuInput.value.trim()}" not found in system!`, 'error');
-      }
-    }
+    if (e.key !== 'Enter') return;
+    const q = skuInput.value.trim().toLowerCase();
+    if (!q) return;
+    const match = (state.items || []).find(i => (i.barcode && i.barcode.trim().toLowerCase() === q) || (i.sku && i.sku.trim().toLowerCase() === q));
+    if (!match) { playBeep('error'); toast(`Barcode / SKU "${skuInput.value.trim()}" not found`, 'error'); return; }
+    if (hasCap('variants') && match.variants_json) showVariantModal(match);
+    else await addItemWithQty(match.id, 1);
+    playBeep('success'); skuInput.value = ''; state.searchQuery = ''; renderItems();
   });
-
-  renderTabs();
-  renderItems();
-  renderTicket();
+  renderTabs(); renderItems(); renderTicket(); updateMobileCartBar();
 }
 
 function getCategoryIcon(name) {
@@ -1386,10 +1527,27 @@ async function setStatus(status) {
   renderTicket();
 }
 
+function setMobileCartOpen(open) {
+  document.body.classList.toggle('mobile-cart-open', Boolean(open));
+}
+
+function updateMobileCartBar() {
+  const bar = qs('#mobileCartBar');
+  const countEl = qs('#mobileCartCount');
+  const totalEl = qs('#mobileCartTotal');
+  if (!bar || !countEl || !totalEl) return;
+  const items = state.order?.items || [];
+  const quantity = items.reduce((sum, item) => sum + Number(item.qty || 0), 0);
+  countEl.textContent = Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  totalEl.textContent = money(state.order?.total_cents || 0);
+  bar.classList.toggle('has-items', quantity > 0);
+}
+
 function renderTicket() {
   const list = qs('#ticketList');
   const foot = qs('#ticketFoot');
   if (!list || !foot) return;
+  updateMobileCartBar();
 
   if (!state.order) {
     list.innerHTML = `<div class="empty">Add products to start a sale</div>`;
@@ -2715,15 +2873,14 @@ async function renderSettings() {
   if (!root) return;
 
   const activeType = state.settings?.business_type || 'bar';
-  const profilesList = Object.entries(state.profiles || {});
   const curTheme = document.documentElement.getAttribute('data-theme') || localStorage.getItem('pos_theme') || 'light';
 
   root.innerHTML = `
     <div class="settings-container" style="max-width: 1040px; margin: 0 auto; padding: 24px;">
       <div class="settings-header" style="margin-bottom: 24px;">
-        <h2 style="font-size:26px; font-weight:800; color:var(--ink); margin:0 0 6px;">Business Settings & Profiles</h2>
+        <h2 style="font-size:26px; font-weight:800; color:var(--ink); margin:0 0 6px;">Business Settings</h2>
         <p style="color:var(--muted); font-size:14px; margin:0;">
-          Select your shop category and appearance preferences below. Each business profile enables tailored features (tables, barcodes, expiry dates, variants, quotes) and loads its dedicated product catalog without deleting your existing sales.
+          Manage this shop's appearance, receipt and business details. The shop category is selected only when you log in.
         </p>
       </div>
 
@@ -2782,53 +2939,6 @@ async function renderSettings() {
               ${curTheme === 'dark' ? '✓ Currently Active' : 'Switch to Dark Theme'}
             </button>
           </div>
-        </div>
-      </div>
-
-      <!-- ── Shop Category Selector ──────────────────────────────────────── -->
-      <div class="settings-section" style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:24px;">
-        <div class="section-title" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span style="font-size:24px;">🏢</span>
-            <div>
-              <h3 style="margin:0; font-size:18px; color:var(--ink); font-weight:700;">Choose Shop Category</h3>
-              <span style="font-size:13px; color:var(--muted);">Click any shop profile to switch instantly</span>
-            </div>
-          </div>
-          <span style="background:var(--bg); color:var(--ink); font-size:12px; font-weight:700; padding:4px 12px; border-radius:20px; border:1px solid var(--line);">
-            Current: ${state.profile?.name || activeType}
-          </span>
-        </div>
-
-        <div class="profile-cards-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px;">
-          ${profilesList.map(([key, prof]) => {
-            const isActive = key === activeType;
-            return `
-              <div class="profile-card ${isActive ? 'selected' : ''}" data-type="${key}" style="background:${isActive ? 'var(--primary-light)' : 'var(--panel)'}; border:2px solid ${isActive ? 'var(--primary)' : 'var(--line)'}; border-radius:12px; padding:18px; cursor:pointer; transition:all 0.2s ease; display:flex; flex-direction:column; justify-content:space-between;">
-                <div>
-                  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-                    <div style="display:flex; align-items:center; gap:10px;">
-                      <span style="font-size:32px;">${prof.icon}</span>
-                      <div>
-                        <h4 style="margin:0; font-size:16px; font-weight:700; color:var(--ink);">${prof.name}</h4>
-                        <span style="font-size:12px; color:var(--muted);">${prof.tagline || prof.description || ''}</span>
-                      </div>
-                    </div>
-                    ${isActive ? `<span style="background:var(--primary); color:#fff; font-size:11px; font-weight:800; padding:3px 8px; border-radius:12px;">ACTIVE</span>` : ''}
-                  </div>
-                  <div class="profile-caps" style="display:flex; flex-wrap:wrap; gap:5px; margin:12px 0;">
-                    ${(prof.capabilities ? Object.entries(prof.capabilities).filter(([k,v]) => v === true).slice(0, 5) : []).map(([k]) => `<span class="cap-pill" style="font-size:11px; padding:3px 8px; border-radius:6px; background:var(--bg); color:var(--muted); border:1px solid var(--line);">✓ ${k.replace(/_/g, ' ')}</span>`).join('')}
-                  </div>
-                </div>
-                <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
-                  <span style="font-size:12px; color:var(--muted);">${prof.item_label || 'Products'} Catalog</span>
-                  <button type="button" class="switch-profile-btn ${isActive ? 'secondary' : 'primary'}" data-type="${key}" style="font-size:12px; padding:6px 14px; border-radius:6px; cursor:pointer;">
-                    ${isActive ? '✓ Selected' : 'Switch to this Shop →'}
-                  </button>
-                </div>
-              </div>
-            `;
-          }).join('')}
         </div>
       </div>
 
@@ -2897,39 +3007,6 @@ async function renderSettings() {
 
   qs('#themeCardLight', root)?.addEventListener('click', () => setTheme('light'));
   qs('#themeCardDark', root)?.addEventListener('click', () => setTheme('dark'));
-
-  // 1-Click Profile switch handler
-  qsa('.profile-cards-grid .profile-card, .profile-cards-grid .switch-profile-btn', root).forEach(el => {
-    el.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const targetCard = el.closest('.profile-card');
-      if (!targetCard) return;
-      const type = targetCard.dataset.type;
-      if (!type || type === activeType) return;
-
-      const prof = state.profiles[type];
-      try {
-        toast(`Switching to ${prof?.name || type}...`, 'info');
-        const updated = await api('/api/settings', {
-          method: 'POST',
-          body: {
-            business_type: type,
-            business_name: prof?.name || type,
-            business_tagline: prof?.tagline || '',
-          }
-        });
-        state.settings = updated.settings;
-        state.profile = updated.profile;
-        state.capabilities = updated.capabilities;
-        toast(`Switched to ${prof?.name || type}!`, 'success');
-        await bootstrap();
-        updateHeaderAndNav();
-        await renderSettings();
-      } catch (err) {
-        toast(err.message, 'error');
-      }
-    });
-  });
 
   // Sample catalog loader
   qs('#seedCatalogBtn', root)?.addEventListener('click', async () => {
@@ -3174,7 +3251,7 @@ function showLoginScreen() {
     localStorage.setItem('pos_logged_in', 'true');
     localStorage.setItem('pos_active_business_type', selectedShop);
 
-    LocalPOS.switchProfile(selectedShop);
+    await LocalPOS.switchProfile(selectedShop);
 
     screen.remove();
     toast(`Logged into ${SHOP_PROFILES.find(p=>p.id===selectedShop)?.name || selectedShop}!`, 'success');
