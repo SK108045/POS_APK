@@ -532,6 +532,10 @@ def hidden_admin_page():
           <span class="nav-icon">&#9646;</span>
           <span class="nav-label">Customers</span>
         </div>
+        <div class="nav-item" data-section="promotions">
+          <span class="nav-icon">&#9646;</span>
+          <span class="nav-label">WhatsApp Promotions</span>
+        </div>
         <div class="nav-item" data-section="pos">
           <span class="nav-icon">&#9646;</span>
           <span class="nav-label">Back to POS</span>
@@ -555,6 +559,7 @@ def hidden_admin_page():
       <div class="content-section" id="sec-users"></div>
       <div class="content-section" id="sec-menu"></div>
       <div class="content-section" id="sec-customers"></div>
+      <div class="content-section" id="sec-promotions"></div>
     </main>
   </div>
 
