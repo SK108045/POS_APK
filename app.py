@@ -24,7 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "pos.sqlite3"
 STATIC_DIR = BASE_DIR / "static"
 HOST = __import__("os").environ.get("POS_HOST", "0.0.0.0")
-PORT = int(__import__("os").environ.get("POS_PORT", "3000"))
+PORT = int(__import__("os").environ.get("PORT") or __import__("os").environ.get("POS_PORT", "3000"))
 
 SESSIONS = {}
 CACHE = {"menu": None, "menu_ts": 0}
