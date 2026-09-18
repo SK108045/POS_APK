@@ -1255,7 +1255,6 @@ function renderTicket() {
           <button class="secondary" id="printQuoteBtn" style="flex:1;">Print Quote</button>
         ` : `
           <button class="primary" id="checkoutBtn" style="flex:1;">Checkout</button>
-          ${hasCap('kot') ? `<button class="secondary" id="kotBtn" style="flex:1; background:#fef3c7; color:#92400e; border:1px solid #fde68a;">🍳 Send KOT</button>` : ''}
         `}
       </div>
       <div style="display:flex; gap:8px;">
@@ -1283,17 +1282,6 @@ function renderTicket() {
     });
   } else {
     qs('#checkoutBtn')?.addEventListener('click', () => showCheckoutModal(state.order));
-    if (hasCap('kot')) {
-      qs('#kotBtn')?.addEventListener('click', async () => {
-        try {
-          await api('/api/order/kot', { method: 'POST', body: { order_id: state.order.id } });
-          toast('Order sent to kitchen / bar KOT!', 'success');
-          showReceiptModal(state.order, true);
-        } catch(err) {
-          toast(err.message, 'error');
-        }
-      });
-    }
   }
 
   qs('#newTicket')?.addEventListener('click', () => { state.order = null; renderTicket(); });
