@@ -1,0 +1,40 @@
+name: Fix SMS campaign delivery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-sms-campaign-delivery.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply SMS campaign delivery fix
+        run: python3 scripts/fix_sms_campaign_delivery.py
+
+      - name: Validate
+        run: |
+          python3 -m py_compile app.py
+          node --check static/admin.js
+          grep -Fq "normalize_sms_phone" app.py
+          grep -Fq "timeout=30" app.py
+          grep -Fq "Send each customer separately" app.py
+          grep -Fq "No SMS messages were sent" static/admin.js
+
+      - name: Commit implementation
+        run: |
+          rm -f scripts/fix_sms_campaign_delivery.py
+          rm -f .github/workflows/fix-sms-campaign-delivery.yml
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py static/admin.js scripts/fix_sms_campaign_delivery.py .github/workflows/fix-sms-campaign-delivery.yml
+          git commit -m 'Fix selected-customer SMS delivery and reporting'
+          git push origin HEAD:main
