@@ -1,0 +1,37 @@
+name: Fix navbar SPA router sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-nav-router-sync.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply fix
+        run: python3 scripts/fix_nav_router_sync.py
+
+      - name: Validate
+        run: |
+          node --check static/app.js
+          grep -Fq 'function syncActiveTopNav' static/app.js
+          grep -Fq 'window.__posActiveNavRouterHooked' static/app.js
+
+      - name: Commit implementation
+        run: |
+          rm -f scripts/fix_nav_router_sync.py
+          rm -f .github/workflows/fix-nav-router-sync.yml
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add static/app.js scripts/fix_nav_router_sync.py .github/workflows/fix-nav-router-sync.yml
+          git commit -m 'Keep active navbar state synced with SPA routes'
+          git push origin HEAD:main
