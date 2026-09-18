@@ -975,21 +975,10 @@ async function sendPromoSmsSelected() {
 
   try {
     const result = await api('/api/admin/sms/send', { method:'POST', body:{ message, customer_ids: ids } });
+    const providerMessage = result.message ? ` · ${promoEscape(result.message)}` : '';
     const skipped = result.skipped ? ` · ${result.skipped} skipped` : '';
-    const allGood = result.sent > 0 && result.failed === 0;
-    const anyGood = result.sent > 0;
-    const bg = allGood ? '#dcfce7' : (anyGood ? '#fef3c7' : '#fee2e2');
-    const fg = allGood ? '#166534' : (anyGood ? '#92400e' : '#991b1b');
-    const icon = allGood ? '✓' : (anyGood ? '⚠' : '✕');
-    const detailRows = (result.results || []).map(r => {
-      const code = r.status_code != null ? ` · code ${promoEscape(r.status_code)}` : '';
-      const cost = r.cost ? ` · ${promoEscape(r.cost)}` : '';
-      const name = r.customer_name ? `${promoEscape(r.customer_name)} · ` : '';
-      return `<div style="margin-top:6px;font-weight:600">${r.success ? '✓' : '✕'} ${name}${promoEscape(r.number || '')} — ${promoEscape(r.status || 'Unknown')}${code}${cost}</div>`;
-    }).join('');
-    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:${bg};color:${fg};font-weight:700">${icon} SMS campaign: ${result.sent}/${result.total} successful${skipped}${detailRows}</div>`;
-    if (result.sent > 0) toast(`SMS sent to ${result.sent} customer${result.sent === 1 ? '' : 's'}`);
-    else toast('No SMS messages were sent. Check the provider status shown below.', 'error');
+    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#dcfce7;color:#166534;font-weight:700">✓ SMS campaign sent: ${result.sent}/${result.total} successful${skipped}${providerMessage}</div>`;
+    toast(`SMS sent to ${result.sent} customer${result.sent === 1 ? '' : 's'}`);
   } catch (e) {
     if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#fee2e2;color:#991b1b;font-weight:700">${promoEscape(e.message)}</div>`;
     toast(e.message, 'error');

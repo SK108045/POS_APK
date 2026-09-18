@@ -57,7 +57,7 @@ def send_africastalking_sms(message, recipients):
         raise RuntimeError("Africa's Talking package is not installed. Run pip install -r requirements.txt") from exc
 
     africastalking.initialize(cfg["username"], cfg["api_key"])
-    return africastalking.SMS.send(message, recipients, timeout=30)
+    return africastalking.SMS.send(message, recipients)
 
 
 def now():
@@ -131,28 +131,6 @@ def normalize_customer_phone(value):
     elif len(digits) == 9 and digits[0] in ('7', '1'):
         digits = '254' + digits
     return digits
-
-
-def normalize_sms_phone(value):
-    """Return an E.164-style phone number for Africa's Talking."""
-    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
-    if not digits:
-        return ''
-
-    # Handle common Kenyan formats: 07..., 7..., 2547..., +2547...
-    # and the occasionally saved +25407... form.
-    if digits.startswith('00254'):
-        digits = digits[2:]
-    if digits.startswith('2540') and len(digits) == 13:
-        digits = '254' + digits[4:]
-    elif len(digits) == 10 and digits.startswith('0'):
-        digits = '254' + digits[1:]
-    elif len(digits) == 9 and digits[0] in ('7', '1'):
-        digits = '254' + digits
-
-    if len(digits) < 10 or len(digits) > 15:
-        return ''
-    return '+' + digits
 
 
 def active_business_type(user=None, conn=None):
@@ -1999,80 +1977,59 @@ class POSHandler(SimpleHTTPRequestHandler):
                     [btype] + customer_ids,
                 ))
 
-                sms_cfg = africastalking_sms_config()
+                recipients = []
                 seen = set()
-                results = []
                 skipped = 0
-                sent = 0
-
-                # Send each customer separately. This mirrors the single-recipient call
-                # already verified against this Africa's Talking account and lets one
-                # bad number fail without hiding/blocking every other recipient.
                 for customer in selected_customers:
-                    phone = normalize_sms_phone(customer.get("phone"))
+                    digits = "".join(ch for ch in str(customer.get("phone") or "") if ch.isdigit())
+                    if len(digits) == 10 and digits.startswith("0"):
+                        digits = "254" + digits[1:]
+                    elif len(digits) == 9 and digits[:1] in ("7", "1"):
+                        digits = "254" + digits
+                    phone = "+" + digits if 10 <= len(digits) <= 15 else ""
                     if not phone or phone in seen:
                         skipped += 1
-                        results.append({
-                            "customer_id": customer.get("id"),
-                            "customer_name": customer.get("name") or "Customer",
-                            "number": phone or str(customer.get("phone") or ""),
-                            "status": "Skipped - invalid or duplicate phone number",
-                            "status_code": None,
-                            "message_id": None,
-                            "cost": None,
-                            "success": False,
-                        })
                         continue
                     seen.add(phone)
+                    recipients.append(phone)
 
-                    try:
-                        provider_result = send_africastalking_sms(message, [phone])
-                    except Exception as exc:
-                        error_text = str(exc).replace(sms_cfg.get("api_key", ""), "***")[:300]
-                        results.append({
-                            "customer_id": customer.get("id"),
-                            "customer_name": customer.get("name") or "Customer",
-                            "number": phone,
-                            "status": error_text or "SMS send failed",
-                            "status_code": None,
-                            "message_id": None,
-                            "cost": None,
-                            "success": False,
-                        })
-                        continue
+                if not recipients:
+                    return self.send_json({"error": "None of the selected customers has a valid phone number"}, 400)
 
-                    sms_data = provider_result.get("SMSMessageData", {}) if isinstance(provider_result, dict) else {}
-                    provider_recipients = sms_data.get("Recipients", []) if isinstance(sms_data, dict) else []
-                    item = provider_recipients[0] if provider_recipients else {}
-                    status = str(item.get("status") or sms_data.get("Message") or "Unknown")
+                sms_cfg = africastalking_sms_config()
+                try:
+                    result = send_africastalking_sms(message, recipients)
+                except Exception as exc:
+                    error_text = str(exc).replace(sms_cfg.get("api_key", ""), "***")
+                    return self.send_json({"error": error_text[:300] or "SMS send failed"}, 502)
+
+                sms_data = result.get("SMSMessageData", {}) if isinstance(result, dict) else {}
+                provider_recipients = sms_data.get("Recipients", []) if isinstance(sms_data, dict) else []
+                results = []
+                sent = 0
+                for item in provider_recipients:
+                    status = str(item.get("status") or "")
                     status_code = item.get("statusCode")
-                    success = status.lower() in ("success", "sent") or status_code == 100
-                    if success:
+                    if status.lower() in ("success", "sent") or status_code == 100:
                         sent += 1
-
                     results.append({
-                        "customer_id": customer.get("id"),
-                        "customer_name": customer.get("name") or "Customer",
-                        "number": item.get("number") or phone,
-                        "status": status,
+                        "number": item.get("number"),
+                        "status": status or "Unknown",
                         "status_code": status_code,
                         "message_id": item.get("messageId") or item.get("message_id"),
                         "cost": item.get("cost"),
-                        "success": success,
-                        "provider_message": sms_data.get("Message") if isinstance(sms_data, dict) else "",
                     })
 
-                attempted = len([r for r in results if not str(r.get("status", "")).startswith("Skipped")])
-                failed = max(0, attempted - sent)
                 self.send_json({
-                    "ok": sent > 0,
+                    "ok": True,
                     "provider": "Africa's Talking",
                     "selected": len(customer_ids),
                     "matched": len(selected_customers),
-                    "total": attempted,
+                    "total": len(recipients),
                     "sent": sent,
-                    "failed": failed,
+                    "failed": max(0, len(recipients) - sent),
                     "skipped": skipped,
+                    "message": sms_data.get("Message") if isinstance(sms_data, dict) else "",
                     "results": results,
                 })
             elif path == "/api/stock/adjust":
