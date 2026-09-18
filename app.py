@@ -71,11 +71,43 @@ def normalize_customer_phone(value):
     return digits
 
 
-def find_customer_by_phone(conn, value):
+def active_business_type(user=None, conn=None):
+    btype = (user or {}).get("business_type") if user else None
+    if btype in PROFILES:
+        return btype
+    if conn is not None:
+        settings = get_settings(conn)
+        btype = settings.get("business_type")
+        if btype in PROFILES:
+            return btype
+    return "retail"
+
+
+def scoped_settings(conn, business_type):
+    business_type = business_type if business_type in PROFILES else "retail"
+    settings = dict(get_settings(conn))
+    profile = PROFILES[business_type]
+    # The global settings table is still used for common settings, but a session
+    # must always display the category/workspace it actually logged into.
+    if settings.get("business_type") != business_type:
+        settings["business_name"] = profile["name"]
+        settings["business_tagline"] = profile["tagline"]
+    settings["business_type"] = business_type
+    return settings
+
+
+def find_customer_by_phone(conn, value, business_type=None):
     target = normalize_customer_phone(value)
     if not target:
         return None
-    for row in conn.execute("SELECT id, name, phone FROM customers").fetchall():
+    if business_type in PROFILES:
+        source = conn.execute(
+            "SELECT id, name, phone FROM customers WHERE business_type = ?",
+            (business_type,),
+        ).fetchall()
+    else:
+        source = conn.execute("SELECT id, name, phone FROM customers").fetchall()
+    for row in source:
         if normalize_customer_phone(row['phone']) == target:
             return row
     return None
@@ -271,6 +303,82 @@ def init_db():
         ]:
             if col_name not in cur_oi_cols:
                 conn.execute(sql)
+
+        # Business workspace isolation. One codebase, separate operational data per shop category.
+        workspace_migrations = [
+            ("orders", "business_type", "ALTER TABLE orders ADD COLUMN business_type TEXT NOT NULL DEFAULT 'bar'"),
+            ("customers", "business_type", "ALTER TABLE customers ADD COLUMN business_type TEXT NOT NULL DEFAULT 'bar'"),
+            ("suppliers", "business_type", "ALTER TABLE suppliers ADD COLUMN business_type TEXT NOT NULL DEFAULT 'bar'"),
+            ("stock_purchases", "business_type", "ALTER TABLE stock_purchases ADD COLUMN business_type TEXT NOT NULL DEFAULT 'bar'"),
+            ("stock_movements", "business_type", "ALTER TABLE stock_movements ADD COLUMN business_type TEXT NOT NULL DEFAULT 'bar'"),
+        ]
+        for table_name, col_name, sql in workspace_migrations:
+            table_cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+            if col_name not in table_cols:
+                conn.execute(sql)
+
+        # Recover the correct shop category for historical sales by looking at
+        # the category of the products that were actually sold on each order.
+        conn.execute("""
+            UPDATE orders
+               SET business_type = COALESCE((
+                   SELECT c.business_type
+                     FROM order_items oi
+                     JOIN menu_items mi ON mi.id = oi.menu_item_id
+                     JOIN categories c ON c.id = mi.category_id
+                    WHERE oi.order_id = orders.id
+                      AND c.business_type IN ('retail','pharmacy','restaurant','hardware','boutique','bar')
+                    ORDER BY oi.id
+                    LIMIT 1
+               ), business_type)
+        """)
+
+        # Existing suppliers/purchases/movements can also be inferred from their products.
+        conn.execute("""
+            UPDATE suppliers
+               SET business_type = COALESCE((
+                   SELECT c.business_type
+                     FROM menu_items mi
+                     JOIN categories c ON c.id = mi.category_id
+                    WHERE mi.supplier_id = suppliers.id
+                      AND c.business_type IN ('retail','pharmacy','restaurant','hardware','boutique','bar')
+                    LIMIT 1
+               ), business_type)
+        """)
+        conn.execute("""
+            UPDATE stock_purchases
+               SET business_type = COALESCE((
+                   SELECT c.business_type
+                     FROM menu_items mi JOIN categories c ON c.id = mi.category_id
+                    WHERE mi.id = stock_purchases.product_id
+                    LIMIT 1
+               ), business_type)
+        """)
+        conn.execute("""
+            UPDATE stock_movements
+               SET business_type = COALESCE((
+                   SELECT c.business_type
+                     FROM menu_items mi JOIN categories c ON c.id = mi.category_id
+                    WHERE mi.id = stock_movements.product_id
+                    LIMIT 1
+               ), business_type)
+        """)
+
+        # Best-effort recovery of historical customer workspace from matching sales.
+        for customer_row in conn.execute("SELECT id, name, phone FROM customers").fetchall():
+            cust_phone = normalize_customer_phone(customer_row["phone"])
+            matches = conn.execute(
+                "SELECT business_type, payment_ref, customer_name FROM orders ORDER BY updated_at DESC"
+            ).fetchall()
+            for order_row in matches:
+                same_phone = cust_phone and normalize_customer_phone(order_row["payment_ref"]) == cust_phone
+                same_name = customer_row["name"] and order_row["customer_name"] == customer_row["name"]
+                if same_phone or same_name:
+                    conn.execute(
+                        "UPDATE customers SET business_type = ? WHERE id = ?",
+                        (order_row["business_type"], customer_row["id"]),
+                    )
+                    break
 
         # Seed sample data for profiles
         seed_sample_data(conn)
@@ -507,13 +615,14 @@ def receipt_page(order, autoprint=False, is_kot=False, settings=None):
 </body>
 </html>"""
 
-def hidden_admin_page():
-    return """<!doctype html>
+def hidden_admin_page(business_type="retail"):
+    profile = PROFILES.get(business_type, PROFILES["retail"])
+    html = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Portal — EITY FIT</title>
+  <title>__SHOP_NAME__ — Admin Portal</title>
   <link rel="stylesheet" href="/static/admin.css?v=1782846743.6849699">
   <script>
     (function() {
@@ -528,10 +637,10 @@ def hidden_admin_page():
     <aside class="sidebar">
       <div class="sidebar-brand">
         <div class="logo">
-          <div class="logo-icon" id="adminBusinessIcon">🛒</div>
-          <span class="name" id="adminBusinessName">POS</span>
+          <div class="logo-icon" id="adminBusinessIcon">__SHOP_ICON__</div>
+          <span class="name" id="adminBusinessName">__SHOP_NAME__</span>
         </div>
-        <div class="tag" id="adminPortalTag">Admin Portal</div>
+        <div class="tag" id="adminPortalTag">__SHOP_NAME__ Admin</div>
         <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
           <span></span><span></span><span></span>
         </button>
@@ -605,6 +714,9 @@ def hidden_admin_page():
   </script>
 </body>
 </html>"""
+    return (html
+            .replace("__SHOP_ICON__", profile.get("icon", "🏪"))
+            .replace("__SHOP_NAME__", profile.get("name", business_type)))
 
 
 def page(title, active, content, role=None, settings=None):
@@ -861,65 +973,48 @@ def cashier_login_page(error=""):
 </html>"""
 
 
-def admin_login_page(error=""):
-    message = f'<p class="error">{error}</p>' if error else ""
+def admin_login_page(error="", selected_business_type=None):
+    if selected_business_type not in PROFILES:
+        with db() as conn:
+            selected_business_type = active_business_type(None, conn)
+    profile = PROFILES[selected_business_type]
+    options = "".join(
+        f'<option value="{key}" {"selected" if key == selected_business_type else ""}>{item["icon"]} {item["name"]}</option>'
+        for key, item in PROFILES.items()
+    )
+    message = f'<p class="err">{error}</p>' if error else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin Login — {STORE_NAME}</title>
+  <title>{profile['name']} — Admin Login</title>
   <link rel="stylesheet" href="/static/admin.css?v={int(time.time())}">
-  <script>
-    (function() {{
-      var t = localStorage.getItem('pos_theme') || 'light';
-      document.documentElement.setAttribute('data-theme', t);
-    }})();
-  </script>
   <style>
     body {{ display:grid; place-items:center; min-height:100vh; background:var(--bg); }}
-    .admin-login-panel {{
-      width: min(380px, calc(100vw - 32px));
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow-lg);
-      padding: 36px;
-      display: grid;
-      gap: 18px;
-    }}
-    .admin-login-panel .brand {{
-      display:flex; align-items:center; gap:10px; margin-bottom:4px;
-    }}
-    .admin-login-panel .logo-icon {{
-      width:38px; height:38px; background:var(--primary);
-      border-radius:9px; display:grid; place-items:center;
-      font-size:18px; font-weight:900; color:#fff;
-    }}
+    .admin-login-panel {{ width:min(410px,calc(100vw - 32px)); background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow-lg); padding:36px; display:grid; gap:18px; }}
+    .admin-login-panel .brand {{ display:flex; align-items:center; gap:10px; }}
+    .admin-login-panel .logo-icon {{ width:42px; height:42px; background:var(--primary); border-radius:9px; display:grid; place-items:center; font-size:22px; color:#fff; }}
     .admin-login-panel h2 {{ margin:0; font-size:20px; font-weight:800; color:var(--navy); }}
-    .admin-login-panel p {{ margin:0; color:var(--muted); font-size:13px; }}
+    .admin-login-panel p {{ margin:2px 0 0; color:var(--muted); font-size:13px; }}
     .admin-login-panel .err {{ color:var(--danger); font-weight:700; font-size:13px; }}
+    .workspace-box {{ padding:12px; border:1px solid var(--line); background:var(--bg); border-radius:10px; }}
   </style>
 </head>
 <body>
   <form class="admin-login-panel" method="post" action="/admin">
     <div class="brand">
-      <div class="logo-icon">B</div>
-      <div>
-        <h2>{STORE_NAME} Admin</h2>
-        <p>Restricted access</p>
-      </div>
+      <div class="logo-icon">{profile['icon']}</div>
+      <div><h2>Shop Admin Portal</h2><p>Choose the shop workspace you want to manage.</p></div>
     </div>
     {message}
-    <div class="form-group">
-      <label class="form-label">Username</label>
-      <input class="form-input" name="username" autocomplete="username" autofocus placeholder="admin">
+    <div class="workspace-box">
+      <label class="form-label">Shop Category / Workspace</label>
+      <select class="form-select" name="business_type" required>{options}</select>
     </div>
-    <div class="form-group">
-      <label class="form-label">Password</label>
-      <input class="form-input" name="password" type="password" autocomplete="current-password" placeholder="••••••••">
-    </div>
-    <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center;padding:12px">Sign In</button>
+    <div class="form-group"><label class="form-label">Username</label><input class="form-input" name="username" autocomplete="username" autofocus placeholder="admin"></div>
+    <div class="form-group"><label class="form-label">Password</label><input class="form-input" name="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+    <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center;padding:12px">Sign In to Selected Shop</button>
   </form>
 </body>
 </html>"""
@@ -1042,7 +1137,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             if user.get("role") != "manager":
                 self.send_html(admin_login_page("Access denied: manager account required"), 403)
                 return
-            self.send_html(hidden_admin_page())
+            self.send_html(hidden_admin_page(active_business_type(user)))
             return
 
         if path == "/admin":
@@ -1053,7 +1148,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             if user.get("role") != "manager":
                 self.send_html(admin_login_page("Access denied: manager account required"), 403)
                 return
-            self.send_html(hidden_admin_page())
+            self.send_html(hidden_admin_page(active_business_type(user)))
             return
 
         user = self.require_user()
@@ -1070,8 +1165,9 @@ class POSHandler(SimpleHTTPRequestHandler):
                 return
             with db() as conn:
                 order = get_order_payload(conn, int(order_id))
-                settings = get_settings(conn)
-            if not order:
+                current_btype = active_business_type(user, conn)
+                settings = scoped_settings(conn, current_btype)
+            if not order or order.get("business_type") != current_btype:
                 self.send_html(page("Receipt", "", '<section class="empty">Order not found</section>'), 404)
                 return
             autoprint = parse_qs(parsed.query).get("print", ["0"])[0] == "1"
@@ -1127,8 +1223,10 @@ class POSHandler(SimpleHTTPRequestHandler):
             if user and not check_password(pin, user["password_hash"]):
                 user = None
             if user:
+                with db() as login_conn:
+                    login_business_type = active_business_type(None, login_conn)
                 sid = secrets.token_urlsafe(32)
-                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"]}
+                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"], "business_type": login_business_type}
                 self.send_response(302)
                 self.send_header("Set-Cookie", f"sid={sid}; HttpOnly; SameSite=Lax; Path=/")
                 self.send_header("Location", "/pos")
@@ -1146,8 +1244,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                     (data.get("username", ""),),
                 ).fetchone()
             if user and check_password(data.get("password", ""), user["password_hash"]):
+                with db() as login_conn:
+                    login_business_type = active_business_type(None, login_conn)
                 sid = secrets.token_urlsafe(32)
-                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"]}
+                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"], "business_type": login_business_type}
                 self.send_response(302)
                 self.send_header("Set-Cookie", f"sid={sid}; HttpOnly; SameSite=Lax; Path=/")
                 self.send_header("Location", "/cashier")
@@ -1157,6 +1257,10 @@ class POSHandler(SimpleHTTPRequestHandler):
             return
         if path == "/admin":
             data = self.read_body()
+            login_business_type = data.get("business_type", "")
+            if login_business_type not in PROFILES:
+                with db() as login_conn:
+                    login_business_type = active_business_type(None, login_conn)
             with db() as conn:
                 user = conn.execute(
                     "SELECT * FROM users WHERE username = ? AND role = 'manager' AND active = 1",
@@ -1164,7 +1268,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                 ).fetchone()
             if user and check_password(data.get("password", ""), user["password_hash"]):
                 sid = secrets.token_urlsafe(32)
-                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"]}
+                SESSIONS[sid] = {"id": user["id"], "username": user["username"], "role": user["role"], "name": user["full_name"], "business_type": login_business_type}
                 self.send_response(302)
                 self.send_header("Set-Cookie", f"sid={sid}; HttpOnly; SameSite=Lax; Path=/")
                 self.send_header("Location", "/admin")
@@ -1182,26 +1286,26 @@ class POSHandler(SimpleHTTPRequestHandler):
 
     def api_get(self, path, query, user):
         with db() as conn:
+            btype = active_business_type(user, conn)
+            settings = scoped_settings(conn, btype)
             if path == "/api/bootstrap":
-                settings = get_settings(conn)
-                btype = settings.get("business_type", "bar")
                 profile = PROFILES.get(btype, PROFILES["retail"])
 
                 expiry_alerts = 0
                 if profile["capabilities"].get("batches_expiry"):
                     future_str = (__import__('datetime').date.today() + __import__('datetime').timedelta(days=60)).isoformat()
                     expiry_alerts = conn.execute(
-                        "SELECT COUNT(*) FROM menu_items WHERE active = 1 AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date <= ?",
-                        (future_str,)
+                        "SELECT COUNT(*) FROM menu_items mi JOIN categories c ON c.id = mi.category_id WHERE mi.active = 1 AND c.business_type = ? AND mi.expiry_date IS NOT NULL AND mi.expiry_date != '' AND mi.expiry_date <= ?",
+                        (btype, future_str,)
                     ).fetchone()[0]
 
                 low_stock_alerts = 0
                 if profile["capabilities"].get("reorder_levels"):
                     low_stock_alerts = conn.execute(
-                        "SELECT COUNT(*) FROM menu_items WHERE active = 1 AND stock_qty <= reorder_level"
+                        "SELECT COUNT(*) FROM menu_items mi JOIN categories c ON c.id = mi.category_id WHERE mi.active = 1 AND c.business_type = ? AND mi.stock_qty <= mi.reorder_level", (btype,)
                     ).fetchone()[0]
 
-                tables = self.tables_payload(conn) if profile["capabilities"].get("tables") else []
+                tables = self.tables_payload(conn, btype) if profile["capabilities"].get("tables") else []
 
                 self.send_json({
                     "user": user,
@@ -1211,7 +1315,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                     "capabilities": profile["capabilities"],
                     "employees": self.employees_payload(conn),
                     "menu": self.menu_payload(conn, btype),
-                    "suppliers": rows(conn.execute("SELECT * FROM suppliers WHERE active = 1 ORDER BY name")),
+                    "suppliers": rows(conn.execute("SELECT * FROM suppliers WHERE active = 1 AND business_type = ? ORDER BY name", (btype,))),
                     "tables": tables,
                     "alerts": {
                         "expiry": expiry_alerts,
@@ -1219,8 +1323,6 @@ class POSHandler(SimpleHTTPRequestHandler):
                     }
                 })
             elif path == "/api/settings":
-                settings = get_settings(conn)
-                btype = settings.get("business_type", "bar")
                 profile = PROFILES.get(btype, PROFILES["retail"])
                 self.send_json({
                     "settings": settings,
@@ -1229,19 +1331,21 @@ class POSHandler(SimpleHTTPRequestHandler):
                     "capabilities": profile["capabilities"],
                 })
             elif path == "/api/tables":
-                self.send_json(self.tables_payload(conn))
+                self.send_json(self.tables_payload(conn, btype))
             elif path == "/api/product/image-search":
                 q = query.get("q", [""])[0].strip()
                 res = search_product_images(q, limit=1)
                 self.send_json({"query": q, "results": res, "images": res})
             elif path == "/api/menu":
-                settings = get_settings(conn)
-                self.send_json(self.menu_payload(conn, settings.get("business_type")))
+                self.send_json(self.menu_payload(conn, btype))
             elif path == "/api/suppliers":
-                self.send_json(rows(conn.execute("SELECT * FROM suppliers ORDER BY name")))
+                self.send_json(rows(conn.execute("SELECT * FROM suppliers WHERE business_type = ? ORDER BY name", (btype,))))
             elif path == "/api/supplier/detail":
                 supplier_id = int(query.get("id", [0])[0])
-                supplier = dict(conn.execute("SELECT * FROM suppliers WHERE id = ?", (supplier_id,)).fetchone())
+                supplier_row = conn.execute("SELECT * FROM suppliers WHERE id = ? AND business_type = ?", (supplier_id, btype)).fetchone()
+                if not supplier_row:
+                    return self.send_json({"error": "supplier_not_found"}, 404)
+                supplier = dict(supplier_row)
                 products = rows(conn.execute(
                     """
                     SELECT m.name, m.cost_cents, m.stock_qty, MAX(sp.date_received) as last_delivery
@@ -1264,15 +1368,18 @@ class POSHandler(SimpleHTTPRequestHandler):
                     SELECT id, name, sku, barcode, stock_qty, unit, category_id, price_cents, cost_cents,
                            wholesale_price_cents, reorder_level, batch_no, expiry_date, manufacturer, strength,
                            variants_json, decimal_qty_enabled, image_url
-                    FROM menu_items WHERE active = 1 ORDER BY stock_qty ASC, name
-                    """
+                    FROM menu_items mi
+                    JOIN categories c ON c.id = mi.category_id
+                    WHERE mi.active = 1 AND c.business_type = ?
+                    ORDER BY mi.stock_qty ASC, mi.name
+                    """, (btype,)
                 )))
             elif path == "/api/order":
                 order_id = query.get("id", [""])[0]
                 if not order_id.isdigit():
                     return self.send_json({"error": "invalid_id"}, 400)
                 order = get_order_payload(conn, int(order_id))
-                if not order:
+                if not order or order.get("business_type") != btype:
                     return self.send_json({"error": "not_found"}, 404)
                 self.send_json(order)
             elif path == "/api/orders":
@@ -1281,10 +1388,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                     SELECT o.*, u.full_name AS employee_name
                     FROM orders o
                     LEFT JOIN users u ON u.id = o.created_by
-                    WHERE (? = 'all' OR o.status = ?)
+                    WHERE o.business_type = ? AND (? = 'all' OR o.status = ?)
                     ORDER BY o.updated_at DESC LIMIT 80
                 """
-                self.send_json(rows(conn.execute(sql, (status, status))))
+                self.send_json(rows(conn.execute(sql, (btype, status, status))))
             elif path == "/api/payments":
                 if not self.require_cashier(user):
                     return
@@ -1295,11 +1402,11 @@ class POSHandler(SimpleHTTPRequestHandler):
                     SELECT o.*, u.full_name AS employee_name
                     FROM orders o
                     LEFT JOIN users u ON u.id = o.created_by
-                    WHERE o.status IN ('open', 'sent')
+                    WHERE o.business_type = ? AND o.status IN ('open', 'sent')
                     AND (? = '' OR o.ticket_no LIKE ? OR u.full_name LIKE ? OR o.customer_name LIKE ?)
                     ORDER BY o.updated_at DESC LIMIT 80
                     """,
-                    (term, like, like, like),
+                    (btype, term, like, like, like),
                 )))
             elif path == "/api/reports":
                 period = query.get("period", ["today"])[0]
@@ -1328,9 +1435,9 @@ class POSHandler(SimpleHTTPRequestHandler):
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
-                    WHERE o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
+                    WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
                     """,
-                    (threshold, ts),
+                    (btype, threshold, ts),
                 ).fetchone())
                 
                 # Payment Breakdown
@@ -1338,10 +1445,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                     """
                     SELECT COALESCE(payment_method, 'cash') as method, SUM(total_cents) as amount
                     FROM orders 
-                    WHERE status = 'paid' AND updated_at >= ? AND updated_at <= ?
+                    WHERE business_type = ? AND status = 'paid' AND updated_at >= ? AND updated_at <= ?
                     GROUP BY payment_method
                     """,
-                    (threshold, ts),
+                    (btype, threshold, ts),
                 ))
                 
                 # Top Items
@@ -1355,10 +1462,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                     FROM order_items oi 
                     JOIN orders o ON o.id = oi.order_id
                     LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
-                    WHERE o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
+                    WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
                     GROUP BY oi.name ORDER BY sales DESC LIMIT 15
                     """,
-                    (threshold, ts),
+                    (btype, threshold, ts),
                 ))
                 
                 stock_stats = dict(conn.execute(
@@ -1366,18 +1473,18 @@ class POSHandler(SimpleHTTPRequestHandler):
                     SELECT 
                         COALESCE(SUM(stock_qty * cost_cents), 0) as inventory_value,
                         COALESCE(SUM(stock_qty * (price_cents - cost_cents)), 0) as potential_profit
-                    FROM menu_items 
-                    WHERE active = 1 AND stock_qty > 0
-                    """
+                    FROM menu_items mi JOIN categories c ON c.id = mi.category_id
+                    WHERE mi.active = 1 AND mi.stock_qty > 0 AND c.business_type = ?
+                    """, (btype,)
                 ).fetchone())
                 
                 self.send_json({"totals": totals, "payments": payments, "top_items": top_items, "period": period, "stock": stock_stats})
             elif path == "/api/admin/summary":
                 if not self.require_manager(user):
                     return
-                self.send_json(self.admin_summary(conn))
+                self.send_json(self.admin_summary(conn, btype))
             elif path == "/api/admin/customers":
-                self.send_json(rows(conn.execute("SELECT * FROM customers ORDER BY name")))
+                self.send_json(rows(conn.execute("SELECT * FROM customers WHERE business_type = ? ORDER BY name", (btype,))))
             elif path == "/api/admin/users":
                 if not self.require_manager(user):
                     return
@@ -1387,17 +1494,21 @@ class POSHandler(SimpleHTTPRequestHandler):
             elif path == "/api/admin/suppliers":
                 if not self.require_manager(user):
                     return
-                self.send_json(rows(conn.execute("SELECT * FROM suppliers ORDER BY name")))
+                self.send_json(rows(conn.execute("SELECT * FROM suppliers WHERE business_type = ? ORDER BY name", (btype,))))
             else:
                 self.send_json({"error": "not_found"}, 404)
 
     def api_post(self, path, data, user, method="POST", query=None):
         with db() as conn:
+            btype = active_business_type(user, conn)
             if path == "/api/settings":
+                requested_btype = data.get("business_type")
+                if requested_btype in PROFILES:
+                    btype = requested_btype
+                    user["business_type"] = requested_btype
                 save_settings(conn, data)
                 CACHE.clear()
-                settings = get_settings(conn)
-                btype = settings.get("business_type", "bar")
+                settings = scoped_settings(conn, btype)
                 profile = PROFILES.get(btype, PROFILES["retail"])
                 self.send_json({
                     "ok": True,
@@ -1409,8 +1520,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                 pid = data.get("profile_id")
                 seed_sample_data(conn, pid)
                 CACHE.clear()
-                settings = get_settings(conn)
-                self.send_json({"ok": True, "menu": self.menu_payload(conn, settings.get("business_type"))})
+                self.send_json({"ok": True, "menu": self.menu_payload(conn, btype)})
             elif path == "/api/product/save-image":
                 img_src = data.get("image_url") or data.get("image_base64")
                 if not img_src:
@@ -1444,18 +1554,18 @@ class POSHandler(SimpleHTTPRequestHandler):
                 is_quote = 1 if (data.get("is_quote") or data.get("order_type") == "quote") else 0
                 cur = conn.execute(
                     """
-                    INSERT INTO orders(ticket_no, table_id, order_type, customer_name, notes, pricing_tier, is_quote, created_by, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO orders(ticket_no, table_id, order_type, customer_name, notes, pricing_tier, is_quote, created_by, created_at, updated_at, business_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (ticket, table_id, data.get("order_type", "walk-in"), customer_name, notes, pricing_tier, is_quote, employee_id, now(), now()),
+                    (ticket, table_id, data.get("order_type", "walk-in"), customer_name, notes, pricing_tier, is_quote, employee_id, now(), now(), btype),
                 )
                 self.send_json(get_order_payload(conn, cur.lastrowid))
             elif path == "/api/order/add":
                 order_id = int(data["order_id"])
-                item = conn.execute("SELECT * FROM menu_items WHERE id = ? AND active = 1", (int(data["menu_item_id"]),)).fetchone()
+                item = conn.execute("SELECT mi.* FROM menu_items mi JOIN categories c ON c.id = mi.category_id WHERE mi.id = ? AND mi.active = 1 AND c.business_type = ?", (int(data["menu_item_id"]), btype)).fetchone()
                 if not item:
                     return self.send_json({"error": "item_not_found"}, 404)
-                order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+                order = conn.execute("SELECT * FROM orders WHERE id = ? AND business_type = ?", (order_id, btype)).fetchone()
                 if not order:
                     return self.send_json({"error": "order_not_found"}, 404)
 
@@ -1509,7 +1619,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                 self.send_json(get_order_payload(conn, row["order_id"]))
             elif path == "/api/order/pay":
                 order_id = int(data["order_id"])
-                order = conn.execute("SELECT status, total_cents, customer_name FROM orders WHERE id = ?", (order_id,)).fetchone()
+                order = conn.execute("SELECT status, total_cents, customer_name FROM orders WHERE id = ? AND business_type = ?", (order_id, btype)).fetchone()
                 if not order:
                     return self.send_json({"error": "order_not_found"}, 404)
                 
@@ -1519,8 +1629,8 @@ class POSHandler(SimpleHTTPRequestHandler):
                         if item["menu_item_id"]:
                             conn.execute("UPDATE menu_items SET stock_qty = stock_qty - ? WHERE id = ?", (item["qty"], item["menu_item_id"]))
                             conn.execute(
-                                "INSERT INTO stock_movements(product_id, qty_change, reason, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                (item["menu_item_id"], -item["qty"], "sale", f"Order #{order_id}", user["id"], now()),
+                                "INSERT INTO stock_movements(product_id, qty_change, reason, note, created_by, created_at, business_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (item["menu_item_id"], -item["qty"], "sale", f"Order #{order_id}", user["id"], now(), btype),
                             )
 
                 payment_method = data.get("payment_method", "cash")
@@ -1569,19 +1679,19 @@ class POSHandler(SimpleHTTPRequestHandler):
                     #     return self.send_json({"error": "Connection to Paystack failed: " + str(e)}, 500)
 
                     # Save the M-Pesa/STK phone into Customers after a successful payment.
-                    customer = find_customer_by_phone(conn, payment_ref)
+                    customer = find_customer_by_phone(conn, payment_ref, btype)
                     if not customer:
                         conn.execute(
-                            "INSERT INTO customers(name, phone, notes) VALUES (?, ?, ?)",
-                            (customer_name.strip() or "Customer", normalize_customer_phone(payment_ref), "Auto-saved from M-Pesa purchase"),
+                            "INSERT INTO customers(name, phone, notes, business_type) VALUES (?, ?, ?, ?)",
+                            (customer_name.strip() or "Customer", normalize_customer_phone(payment_ref), "Auto-saved from M-Pesa purchase", btype),
                         )
 
                 if payment_method != "mpesa" and customer_phone:
-                    customer = find_customer_by_phone(conn, customer_phone)
+                    customer = find_customer_by_phone(conn, customer_phone, btype)
                     if not customer:
                         conn.execute(
-                            "INSERT INTO customers(name, phone, notes) VALUES (?, ?, ?)",
-                            (customer_name.strip() or "Customer", customer_phone, "Saved from POS checkout"),
+                            "INSERT INTO customers(name, phone, notes, business_type) VALUES (?, ?, ?, ?)",
+                            (customer_name.strip() or "Customer", customer_phone, "Saved from POS checkout", btype),
                         )
 
                 conn.execute(
@@ -1658,8 +1768,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                         ),
                     )
                 CACHE.clear()
-                settings = get_settings(conn)
-                self.send_json(self.menu_payload(conn, settings.get("business_type")))
+                self.send_json(self.menu_payload(conn, btype))
             elif path == "/api/admin/user":
                 if not self.require_manager(user):
                     return
@@ -1702,12 +1811,12 @@ class POSHandler(SimpleHTTPRequestHandler):
                 total = qty * cost
                 conn.execute("UPDATE menu_items SET cost_cents = ?, stock_qty = stock_qty + ?, supplier_id = ? WHERE id = ?", (cost, qty, supplier_id, product_id))
                 conn.execute(
-                    "INSERT INTO stock_purchases (supplier_id, product_id, qty_received, cost_per_unit_cents, total_cost_cents, date_received, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (supplier_id, product_id, qty, cost, total, now(), user["id"])
+                    "INSERT INTO stock_purchases (supplier_id, product_id, qty_received, cost_per_unit_cents, total_cost_cents, date_received, created_by, business_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (supplier_id, product_id, qty, cost, total, now(), user["id"], btype)
                 )
                 conn.execute(
-                    "INSERT INTO stock_movements (product_id, qty_change, reason, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (product_id, qty, 'purchase', f'Supplier {supplier_id}', user["id"], now())
+                    "INSERT INTO stock_movements (product_id, qty_change, reason, note, created_by, created_at, business_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (product_id, qty, 'purchase', f'Supplier {supplier_id}', user["id"], now(), btype)
                 )
                 self.send_json({"success": True})
             elif path == "/api/admin/supplier":
@@ -1720,15 +1829,15 @@ class POSHandler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "missing_supplier_name"}, 400)
                 if data.get("id"):
                     conn.execute(
-                        "UPDATE suppliers SET name=?, phone=?, email=?, address=?, active=? WHERE id=?",
-                        (name, phone, email, address, active, int(data["id"])),
+                        "UPDATE suppliers SET name=?, phone=?, email=?, address=?, active=? WHERE id=? AND business_type=?",
+                        (name, phone, email, address, active, int(data["id"]), btype),
                     )
                 else:
                     conn.execute(
-                        "INSERT INTO suppliers(name, phone, email, address, active) VALUES (?, ?, ?, ?, ?)",
-                        (name, phone, email, address, active),
+                        "INSERT INTO suppliers(name, phone, email, address, active, business_type) VALUES (?, ?, ?, ?, ?, ?)",
+                        (name, phone, email, address, active, btype),
                     )
-                self.send_json(rows(conn.execute("SELECT * FROM suppliers ORDER BY name")))
+                self.send_json(rows(conn.execute("SELECT * FROM suppliers WHERE business_type = ? ORDER BY name", (btype,))))
             elif path == "/api/admin/customer":
                 name = data.get("name", "").strip()
                 phone = data.get("phone", "").strip()
@@ -1738,15 +1847,15 @@ class POSHandler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "missing_customer_name"}, 400)
                 if data.get("id"):
                     conn.execute(
-                        "UPDATE customers SET name=?, phone=?, email=?, notes=? WHERE id=?",
-                        (name, phone, email, notes, int(data["id"])),
+                        "UPDATE customers SET name=?, phone=?, email=?, notes=? WHERE id=? AND business_type=?",
+                        (name, phone, email, notes, int(data["id"]), btype),
                     )
                 else:
                     conn.execute(
-                        "INSERT INTO customers(name, phone, email, notes) VALUES (?, ?, ?, ?)",
-                        (name, phone, email, notes),
+                        "INSERT INTO customers(name, phone, email, notes, business_type) VALUES (?, ?, ?, ?, ?)",
+                        (name, phone, email, notes, btype),
                     )
-                self.send_json(rows(conn.execute("SELECT * FROM customers ORDER BY name")))
+                self.send_json(rows(conn.execute("SELECT * FROM customers WHERE business_type = ? ORDER BY name", (btype,))))
             elif path == "/api/stock/adjust":
                 if not self.require_manager(user):
                     return
@@ -1759,8 +1868,8 @@ class POSHandler(SimpleHTTPRequestHandler):
                     (qty_change, product_id),
                 )
                 conn.execute(
-                    "INSERT INTO stock_movements(product_id, qty_change, reason, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (product_id, qty_change, reason, note, user["id"], now()),
+                    "INSERT INTO stock_movements(product_id, qty_change, reason, note, created_by, created_at, business_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (product_id, qty_change, reason, note, user["id"], now(), btype),
                 )
                 CACHE["menu"] = None
                 self.send_json({"ok": True, "product_id": product_id, "qty_change": qty_change})
@@ -1800,14 +1909,14 @@ class POSHandler(SimpleHTTPRequestHandler):
         CACHE[f"menu_ts_{business_type}"] = now()
         return payload
 
-    def tables_payload(self, conn):
+    def tables_payload(self, conn, business_type=None):
         return rows(conn.execute(
             """
             SELECT t.*, o.id AS order_id, o.ticket_no, o.total_cents
             FROM dining_tables t
-            LEFT JOIN orders o ON o.table_id = t.id AND o.status IN ('open', 'sent')
+            LEFT JOIN orders o ON o.table_id = t.id AND o.status IN ('open', 'sent') AND (? IS NULL OR o.business_type = ?)
             WHERE t.active = 1 ORDER BY t.id
-            """
+            """, (business_type, business_type)
         ))
 
     def employees_payload(self, conn):
@@ -1821,7 +1930,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             """
         ))
 
-    def admin_summary(self, conn):
+    def admin_summary(self, conn, business_type):
         day_start = now() - 86400
         week_start = now() - 604800
         totals = dict(conn.execute(
@@ -1832,63 +1941,51 @@ class POSHandler(SimpleHTTPRequestHandler):
               COUNT(CASE WHEN status IN ('open','sent') THEN 1 END) AS unpaid_orders,
               COALESCE(SUM(CASE WHEN status IN ('open','sent') THEN total_cents END), 0) AS unpaid_total,
               COALESCE(SUM(CASE WHEN status = 'paid' AND updated_at >= ? THEN total_cents END), 0) AS sales_week
-            FROM orders
+            FROM orders WHERE business_type = ?
             """,
-            (day_start, day_start, week_start),
+            (day_start, day_start, week_start, business_type),
         ).fetchone())
         by_employee = rows(conn.execute(
             """
             SELECT u.full_name AS employee, COUNT(o.id) AS orders, COALESCE(SUM(o.total_cents), 0) AS sales
             FROM orders o JOIN users u ON u.id = o.created_by
-            WHERE o.status = 'paid' AND o.updated_at >= ?
-            GROUP BY u.id, u.full_name
-            ORDER BY sales DESC LIMIT 8
-            """,
-            (week_start,),
+            WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ?
+            GROUP BY u.id, u.full_name ORDER BY sales DESC LIMIT 8
+            """, (business_type, week_start),
         ))
         by_method = rows(conn.execute(
             """
             SELECT COALESCE(payment_method, 'unknown') AS method, COUNT(*) AS count, COALESCE(SUM(total_cents), 0) AS sales
             FROM orders
-            WHERE status = 'paid' AND updated_at >= ?
+            WHERE business_type = ? AND status = 'paid' AND updated_at >= ?
             GROUP BY payment_method ORDER BY sales DESC
-            """,
-            (week_start,),
+            """, (business_type, week_start),
         ))
         top_items = rows(conn.execute(
             """
             SELECT oi.name, SUM(oi.qty) AS qty, SUM(oi.line_total_cents) AS sales
             FROM order_items oi JOIN orders o ON o.id = oi.order_id
-            WHERE o.status = 'paid' AND o.updated_at >= ?
+            WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ?
             GROUP BY oi.name ORDER BY sales DESC LIMIT 8
-            """,
-            (week_start,),
+            """, (business_type, week_start),
         ))
         counts = dict(conn.execute(
             """
             SELECT
               (SELECT COUNT(*) FROM users WHERE active = 1 AND role NOT IN ('terminal')) AS active_users,
-              (SELECT COUNT(*) FROM menu_items WHERE active = 1) AS active_items,
-              (SELECT COUNT(*) FROM suppliers WHERE active = 1) AS active_suppliers
-            """
+              (SELECT COUNT(*) FROM menu_items mi JOIN categories c ON c.id = mi.category_id WHERE mi.active = 1 AND c.business_type = ?) AS active_items,
+              (SELECT COUNT(*) FROM suppliers WHERE active = 1 AND business_type = ?) AS active_suppliers
+            """, (business_type, business_type)
         ).fetchone())
         sales_trend = rows(conn.execute(
             """
             SELECT strftime('%Y-%m-%d', updated_at, 'unixepoch', 'localtime') AS day, COALESCE(SUM(total_cents), 0) AS sales
             FROM orders
-            WHERE status = 'paid' AND updated_at >= ?
+            WHERE business_type = ? AND status = 'paid' AND updated_at >= ?
             GROUP BY day ORDER BY day ASC
-            """,
-            (week_start,)
+            """, (business_type, week_start)
         ))
-        return {
-            "totals": totals,
-            "counts": counts,
-            "by_employee": by_employee,
-            "by_method": by_method,
-            "top_items": top_items,
-            "sales_trend": sales_trend,
-        }
+        return {"totals": totals, "counts": counts, "by_employee": by_employee, "by_method": by_method, "top_items": top_items, "sales_trend": sales_trend, "business_type": business_type}
 
     do_DELETE = do_POST
 

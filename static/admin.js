@@ -115,7 +115,7 @@ function buildDashboard(s) {
     <div class="page-header">
       <div class="page-header-left">
         <h1>Dashboard</h1>
-        <p>Live business overview for ${state.settings?.business_name || state.profile?.name || 'this business'}</p>
+        <p><strong>${state.profile?.icon || '🏪'} ${state.profile?.name || 'Business'} Workspace</strong> · Only this shop category's sales and customers are shown here.</p>
       </div>
       <button class="btn btn-ghost btn-sm" onclick="renderDashboard()">Refresh</button>
     </div>
@@ -729,40 +729,40 @@ async function adjustStock(productId, direction) {
 // ── WHATSAPP PROMOTIONS ──────────────────────────────────────────────────────
 const PROMO_PROFILE_COPY = {
   retail: {
-    general: 'Thanks for shopping with us! We have fresh stock and great value in store, and we would love to see you again soon.',
-    stock: 'New stock has arrived! Drop by and check out what is new in store.',
+    general: 'Thanks for shopping with us. We have fresh stock and great deals available in store. Visit us again soon.',
+    stock: 'New stock is in. Drop by and check out what is available.',
     offer: 'We have a special offer running in store. Visit us and enjoy the deal while it lasts.',
-    comeback: 'It has been a while since your last visit. We would love to welcome you back soon.'
+    comeback: 'We would love to see you again. Drop by whenever you are around.'
   },
   pharmacy: {
-    general: 'Thanks for choosing us. We are here whenever you need pharmacy, wellness and personal-care essentials. We look forward to serving you again.',
-    stock: 'Fresh pharmacy, wellness and personal-care stock is now available. Feel free to check with us before your next visit.',
-    offer: 'We have special offers on selected wellness and personal-care items. Visit us for the current deals.',
-    comeback: 'We would be happy to serve you again. Visit us whenever you need your pharmacy, wellness or personal-care essentials.'
+    general: 'Thanks for choosing us. We are here for your pharmacy and wellness needs. Visit us again whenever you need us.',
+    stock: 'Fresh pharmacy and wellness stock is available. Visit us or message us to check availability.',
+    offer: 'We have offers on selected wellness and personal-care items. Visit us for the current deals.',
+    comeback: 'We would be happy to serve you again whenever you need your pharmacy and wellness essentials.'
   },
   restaurant: {
-    general: 'Thanks for dining with us! We would love to have you back for another meal. Come by and enjoy your favourites again soon.',
-    stock: 'Fresh dishes and your favourites are waiting for you. Come by and enjoy a great meal with us.',
+    general: 'Thanks for dining with us. We would love to serve you again. Visit us soon and enjoy your favourite meals.',
+    stock: 'Your favourite meals are waiting. Come by and enjoy a fresh meal with us.',
     offer: 'We have a special food offer available. Come by and enjoy it while it lasts.',
-    comeback: 'We miss having you around! Come back for another meal soon — we would love to serve you again.'
+    comeback: 'We would love to have you back. Come by for another meal soon.'
   },
   hardware: {
-    general: 'Thanks for shopping with us! For your next project, we are ready with hardware, tools and building supplies. Send us your list anytime and we will help you check availability or prepare a quote.',
-    stock: 'New hardware and building-material stock has arrived. Send us your list or visit us to check availability.',
-    offer: 'We have a special deal on selected hardware and building supplies. Visit us for the current prices and offers.',
-    comeback: 'Planning another project? We are ready to help with your hardware list, stock checks and quotations.'
+    general: 'Thanks for shopping with us. We are ready to help with your next project. Visit us or message us for stock and quotations.',
+    stock: 'New hardware and building-material stock is in. Visit us or message us to check availability.',
+    offer: 'We have a special deal on selected hardware and building supplies. Visit us for the current prices.',
+    comeback: 'Planning another project? Visit us or send your list and we will help with stock and quotations.'
   },
   boutique: {
-    general: 'Thanks for shopping with us! New styles, colours and beauty picks are always coming in. We would love to see you again soon.',
-    stock: 'New arrivals are in! Come by and check out the latest styles, colours, sizes and beauty picks.',
-    offer: 'We have a special offer on selected fashion, beauty and cosmetics items. Visit us and enjoy the deal while it lasts.',
-    comeback: 'It has been a while since your last visit. Come see the latest arrivals — we would love to have you back.'
+    general: 'Thanks for shopping with us. New styles and beauty picks are always coming in. Visit us again soon.',
+    stock: 'New arrivals are in. Come by and check out the latest styles, colours and beauty picks.',
+    offer: 'We have a special offer on selected fashion and beauty items. Visit us while the deal lasts.',
+    comeback: 'We would love to see you again. Come by and check out the latest arrivals.'
   },
   bar: {
-    general: 'Thanks for spending time with us! We would love to have you back for another good time. See you again soon.',
-    stock: 'There is something fresh happening at the venue. Come by for good vibes, refreshments and a great time.',
+    general: 'Thanks for visiting us. Come through again soon for good vibes, drinks and a great time.',
+    stock: 'Come through and enjoy good vibes, refreshments and a great time with us.',
     offer: 'We have a special offer at the venue. Come through and enjoy it while it lasts.',
-    comeback: 'It has been a while since your last visit. Come through again soon — we would love to have you back.'
+    comeback: 'Come through again soon. We would love to have you back.'
   }
 };
 
@@ -784,10 +784,7 @@ function promoTemplateBody(type, campaign) {
 }
 
 function makePromoTemplate(type, campaign, businessName) {
-  const body = promoTemplateBody(type, campaign);
-  return `${body}
-
-— ${businessName}`;
+  return promoTemplateBody(type, campaign);
 }
 
 function personalizePromoMessage(template, customer) {
