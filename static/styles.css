@@ -1910,3 +1910,69 @@ main { min-height: calc(100vh - 69px); }
   align-items: center;
   justify-content: space-between;
 }
+
+/* ── Mobile / Capacitor phone layout (≤ 600 px) ────────────────────── */
+@media (max-width: 600px) {
+  /* Stack POS shell: menu above, ticket below */
+  .pos-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  /* Let each panel scroll independently on phone */
+  .menu-side,
+  .ticket-side {
+    min-height: 0;
+    max-height: none;
+  }
+
+  /* 2-column product grid on phone (was 4) */
+  .item-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 8px;
+  }
+
+  /* Smaller product cards on phone */
+  .menu-btn {
+    min-height: 160px;
+  }
+
+  .menu-btn-img-wrapper {
+    height: 90px;
+  }
+
+  /* Ensure all interactive elements meet 44px touch target */
+  .tab,
+  .nav-link,
+  .qty-controls button,
+  .pin-pad button {
+    min-height: 44px;
+  }
+
+  /* Full-width pay buttons */
+  .pay-actions {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  /* Prevent horizontal overflow in ticket totals */
+  .ticket-foot {
+    padding: 8px;
+  }
+
+  .totals {
+    font-size: 13px;
+  }
+
+  .totals .grand {
+    font-size: 18px;
+  }
+
+  /* Topbar: hide clock text on tiny screens */
+  #navDate {
+    display: none;
+  }
+}
