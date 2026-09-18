@@ -57,7 +57,7 @@ def send_africastalking_sms(message, recipients):
         raise RuntimeError("Africa's Talking package is not installed. Run pip install -r requirements.txt") from exc
 
     africastalking.initialize(cfg["username"], cfg["api_key"])
-    return africastalking.SMS.send(message, recipients, timeout=30)
+    return africastalking.SMS.send(message, recipients)
 
 
 def now():
