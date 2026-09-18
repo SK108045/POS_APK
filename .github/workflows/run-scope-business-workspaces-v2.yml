@@ -1,0 +1,72 @@
+name: Retry business workspace isolation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/run-scope-business-workspaces-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fix migration guard
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          f = Path('scripts/scope_business_workspaces.py')
+          s = f.read_text()
+          old = '''    if not block.endswith('"""'):
+        raise SystemExit('Unexpected hidden_admin_page ending')
+    block = block[:-3] + '''"""\n    return (html\n            .replace("__SHOP_ICON__", profile.get("icon", "🏪"))\n            .replace("__SHOP_NAME__", profile.get("name", business_type)))'''
+'''
+          new = '''    quote_pos = block.rfind('"""')
+    if quote_pos == -1:
+        raise SystemExit('Could not locate hidden_admin_page closing quotes')
+    block = block[:quote_pos] + '''"""\n    return (html\n            .replace("__SHOP_ICON__", profile.get("icon", "🏪"))\n            .replace("__SHOP_NAME__", profile.get("name", business_type)))''' + block[quote_pos + 3:]
+'''
+          if old not in s:
+              raise SystemExit('Guard snippet not found')
+          f.write_text(s.replace(old, new, 1))
+          PY
+      - name: Apply workspace isolation
+        run: python3 scripts/scope_business_workspaces.py
+      - name: Validate syntax and DB migration
+        run: |
+          python3 -m py_compile app.py profiles.py
+          node --check static/app.js
+          node --check static/admin.js
+          python3 - <<'PY'
+          import app
+          app.init_db()
+          with app.db() as conn:
+              for table in ('orders','customers','suppliers','stock_purchases','stock_movements'):
+                  cols = {r['name'] for r in conn.execute(f'PRAGMA table_info({table})')}
+                  assert 'business_type' in cols, table
+              groups = [(r['business_type'], r['n']) for r in conn.execute("SELECT business_type, COUNT(*) n FROM orders GROUP BY business_type")]
+              print('Order workspaces:', groups)
+              # prove admin summary is isolated rather than global
+              for btype in ('retail','pharmacy','restaurant','hardware','boutique','bar'):
+                  summary = app.POSHandler.admin_summary(None, conn, btype)
+                  print(btype, summary['totals']['sales_today'], len(summary['top_items']))
+          PY
+          grep -q 'Shop Category / Workspace' app.py
+          grep -q 'Only this shop category' static/admin.js
+          grep -q 'FROM orders WHERE business_type = ?' app.py
+      - name: Commit implementation
+        run: |
+          rm -f scripts/scope_business_workspaces.py
+          rm -f .github/workflows/scope-business-workspaces.yml
+          rm -f .github/workflows/run-scope-business-workspaces-now.yml
+          rm -f .github/workflows/run-scope-business-workspaces-v2.yml
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py static/admin.js scripts/scope_business_workspaces.py .github/workflows/scope-business-workspaces.yml .github/workflows/run-scope-business-workspaces-now.yml .github/workflows/run-scope-business-workspaces-v2.yml
+          git commit -m 'Isolate POS data by shop category'
+          git push origin HEAD:main
