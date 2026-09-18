@@ -925,18 +925,13 @@ function renderItems() {
       return;
     }
 
-    if (item.decimal_qty_enabled || hasCap('decimal_qty') || hasCap('order_notes')) {
-      showQtyPopup(item);
-      return;
-    }
-
-    const existing = state.order?.items?.find(i => i.menu_item_id === item.id);
-    const existingQty = existing ? existing.qty : 0;
-    if (item.stock_qty !== undefined && (1 + existingQty) > item.stock_qty) {
+    const existing = state.order?.items?.find(i => i.menu_item_id === item.id && !(i.variant_info || ''));
+    const existingQty = existing ? Number(existing.qty || 0) : 0;
+    if (item.stock_qty !== undefined && (1 + existingQty) > Number(item.stock_qty)) {
       toast(`Cannot add item. Only ${item.stock_qty} left in stock (you have ${existingQty} in cart).`, 'error');
       return;
     }
-    await addItemWithQty(item.id, 1);
+    await addItemWithQty(item.id, 1, '', '', item.batch_no || '');
   }));
 }
 
@@ -995,24 +990,30 @@ function showVariantModal(item) {
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
 
   overlay.querySelectorAll('.variant-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const idx = Number(btn.dataset.idx);
       const selected = variants[idx];
       const vName = typeof selected === 'object' ? selected.name : selected;
-      const vPrice = typeof selected === 'object' && selected.price_cents ? selected.price_cents : null;
+      const existing = state.order?.items?.find(i => i.menu_item_id === item.id && (i.variant_info || '') === (vName || ''));
+      const existingQty = existing ? Number(existing.qty || 0) : 0;
+      const variantStock = typeof selected === 'object' && selected.stock_qty !== undefined ? Number(selected.stock_qty) : Number(item.stock_qty);
+      if (Number.isFinite(variantStock) && (1 + existingQty) > variantStock) {
+        toast(`Cannot add ${vName}. Only ${variantStock} left in stock.`, 'error');
+        return;
+      }
       close();
-      showQtyPopup(item, vName, vPrice);
+      await addItemWithQty(item.id, 1, vName || '', '', item.batch_no || '');
     });
   });
 
-  overlay.querySelector('#varCustomConfirm').addEventListener('click', () => {
+  overlay.querySelector('#varCustomConfirm').addEventListener('click', async () => {
     const val = overlay.querySelector('#customVariantInput').value.trim();
     if (!val) {
       toast('Please enter or select a variant', 'error');
       return;
     }
     close();
-    showQtyPopup(item, val);
+    await addItemWithQty(item.id, 1, val, '', item.batch_no || '');
   });
 }
 
@@ -2376,7 +2377,7 @@ async function renderReports(period = 'today') {
 
   root.innerHTML = `
     <div class="panel-title-group" style="margin: 0 24px 20px; padding-top: 24px; display: flex; justify-content: space-between; align-items: center;">
-      <h2>Business Analytics</h2>
+      <div><h2 style="margin:0">Business Analytics</h2><div style="font-size:12px;color:var(--muted);margin-top:4px;">${report.range?.label || 'Selected period'} · ${state.profile?.name || 'POS'}</div></div>
       <div style="display:flex; gap: 8px;">
         <select id="reportPeriod" class="field" style="padding: 6px 12px; height: 36px;">
           <option value="today" ${period === 'today' ? 'selected' : ''}>Today</option>
@@ -2405,8 +2406,12 @@ async function renderReports(period = 'today') {
         <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">Potential Profit: ${money(report.stock?.potential_profit || 0)}</div>
       </div>
       <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
-        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Cash in Drawer</div>
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Cash Sales</div>
         <div style="font-size: 28px; font-weight: 800; color: #16a34a; margin-top: 8px;">${money(cashTotal)}</div>
+      </div>
+      <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">M-Pesa Sales</div>
+        <div style="font-size: 28px; font-weight: 800; color: #16a34a; margin-top: 8px;">${money(mpesaTotal)}</div>
       </div>
     </div>
     
@@ -2451,8 +2456,8 @@ async function renderReports(period = 'today') {
         hr { border-top: 1px dashed black; border-bottom: none; margin: 10px 0; }
       </style></head><body>
         <div class="text-center">
-          <h2>NIGHTCLUB POS</h2>
-          <p style="margin:0">Z-REPORT (${period.toUpperCase()})</p>
+          <h2>${state.settings?.business_name || state.profile?.name || 'POS'}</h2>
+          <p style="margin:0">Z-REPORT · ${report.range?.label || period.toUpperCase()}</p>
         </div>
         <hr>
         <div class="flex"><span>TOTAL SALES:</span> <strong>${money(report.totals.sales)}</strong></div>

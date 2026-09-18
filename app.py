@@ -36,6 +36,40 @@ def now():
     return int(time.time())
 
 
+def report_period_bounds(period, reference_ts=None, tz_name="Africa/Nairobi"):
+    """Return [start, end) epoch bounds for POS reporting in the shop timezone."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(tz_name)
+    ref_ts = int(reference_ts if reference_ts is not None else now())
+    current = datetime.fromtimestamp(ref_ts, tz)
+    today_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if period == "yesterday":
+        start_dt = today_start - timedelta(days=1)
+        end_dt = today_start
+        label = start_dt.strftime("%d %b %Y")
+    elif period == "week":
+        start_dt = today_start - timedelta(days=6)
+        end_dt = current
+        label = f"{start_dt.strftime('%d %b')} – {current.strftime('%d %b %Y')}"
+    elif period == "month":
+        start_dt = today_start - timedelta(days=29)
+        end_dt = current
+        label = f"{start_dt.strftime('%d %b')} – {current.strftime('%d %b %Y')}"
+    else:
+        period = "today"
+        start_dt = today_start
+        end_dt = current
+        label = current.strftime("%d %b %Y")
+
+    start_ts = int(start_dt.timestamp())
+    # Current-period reports include transactions stamped in the current second.
+    end_ts = int(end_dt.timestamp()) + (1 if period != "yesterday" else 0)
+    return start_ts, end_ts, label
+
+
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000).hex()
@@ -291,6 +325,7 @@ def init_db():
             ("pricing_tier", "ALTER TABLE orders ADD COLUMN pricing_tier TEXT NOT NULL DEFAULT 'retail'"),
             ("is_quote", "ALTER TABLE orders ADD COLUMN is_quote INTEGER NOT NULL DEFAULT 0"),
             ("notes", "ALTER TABLE orders ADD COLUMN notes TEXT NOT NULL DEFAULT ''"),
+            ("paid_at", "ALTER TABLE orders ADD COLUMN paid_at INTEGER"),
         ]:
             if col_name not in cur_o_cols:
                 conn.execute(sql)
@@ -300,9 +335,18 @@ def init_db():
         for col_name, sql in [
             ("variant_info", "ALTER TABLE order_items ADD COLUMN variant_info TEXT NOT NULL DEFAULT ''"),
             ("batch_no", "ALTER TABLE order_items ADD COLUMN batch_no TEXT NOT NULL DEFAULT ''"),
+            ("cost_cents", "ALTER TABLE order_items ADD COLUMN cost_cents INTEGER"),
         ]:
             if col_name not in cur_oi_cols:
                 conn.execute(sql)
+
+        # Backfill report snapshots for existing data. New sales keep these values forever.
+        conn.execute("UPDATE orders SET paid_at = updated_at WHERE status = 'paid' AND (paid_at IS NULL OR paid_at = 0)")
+        conn.execute("""
+            UPDATE order_items
+               SET cost_cents = COALESCE((SELECT mi.cost_cents FROM menu_items mi WHERE mi.id = order_items.menu_item_id), 0)
+             WHERE cost_cents IS NULL
+        """)
 
         # Business workspace isolation. One codebase, separate operational data per shop category.
         workspace_migrations = [
@@ -1410,75 +1454,85 @@ class POSHandler(SimpleHTTPRequestHandler):
                 )))
             elif path == "/api/reports":
                 period = query.get("period", ["today"])[0]
-                # Determine timestamp threshold based on period
-                ts = now()
-                if period == "today":
-                    # Simple assumption: last 24h for today
-                    threshold = ts - 86400
-                elif period == "yesterday":
-                    threshold = ts - (86400 * 2)
-                    ts = ts - 86400
-                elif period == "week":
-                    threshold = ts - (86400 * 7)
-                elif period == "month":
-                    threshold = ts - (86400 * 30)
-                else:
-                    threshold = ts - 86400
-                    
-                # Using a single query to get total sales and approximate costs
+                if period not in ("today", "yesterday", "week", "month"):
+                    period = "today"
+                start_ts, end_ts, range_label = report_period_bounds(period)
+
                 totals = dict(conn.execute(
                     """
-                    SELECT 
-                        COUNT(DISTINCT o.id) AS orders, 
-                        COALESCE(SUM(oi.line_total_cents),0) AS sales,
-                        COALESCE(SUM(oi.qty * mi.cost_cents),0) AS costs
+                    SELECT
+                        COUNT(DISTINCT o.id) AS orders,
+                        COALESCE(SUM(oi.line_total_cents), 0) AS sales,
+                        COALESCE(SUM(oi.qty * COALESCE(oi.cost_cents, mi.cost_cents, 0)), 0) AS costs,
+                        COALESCE(SUM(oi.qty), 0) AS items_sold
                     FROM orders o
                     JOIN order_items oi ON o.id = oi.order_id
                     LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
-                    WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
+                    WHERE o.business_type = ?
+                      AND o.status = 'paid'
+                      AND COALESCE(o.paid_at, o.updated_at) >= ?
+                      AND COALESCE(o.paid_at, o.updated_at) < ?
                     """,
-                    (btype, threshold, ts),
+                    (btype, start_ts, end_ts),
                 ).fetchone())
-                
-                # Payment Breakdown
+
                 payments = rows(conn.execute(
                     """
-                    SELECT COALESCE(payment_method, 'cash') as method, SUM(total_cents) as amount
-                    FROM orders 
-                    WHERE business_type = ? AND status = 'paid' AND updated_at >= ? AND updated_at <= ?
-                    GROUP BY payment_method
+                    SELECT COALESCE(payment_method, 'cash') AS method,
+                           COUNT(*) AS transactions,
+                           COALESCE(SUM(total_cents), 0) AS amount
+                    FROM orders
+                    WHERE business_type = ?
+                      AND status = 'paid'
+                      AND COALESCE(paid_at, updated_at) >= ?
+                      AND COALESCE(paid_at, updated_at) < ?
+                    GROUP BY COALESCE(payment_method, 'cash')
+                    ORDER BY amount DESC
                     """,
-                    (btype, threshold, ts),
+                    (btype, start_ts, end_ts),
                 ))
-                
-                # Top Items
+
                 top_items = rows(conn.execute(
                     """
-                    SELECT 
-                        oi.name, 
-                        SUM(oi.qty) AS qty, 
-                        SUM(oi.line_total_cents) AS sales,
-                        MAX(mi.stock_qty) as current_stock
-                    FROM order_items oi 
+                    SELECT
+                        oi.name,
+                        COALESCE(SUM(oi.qty), 0) AS qty,
+                        COALESCE(SUM(oi.line_total_cents), 0) AS sales,
+                        MAX(mi.stock_qty) AS current_stock
+                    FROM order_items oi
                     JOIN orders o ON o.id = oi.order_id
                     LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
-                    WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ? AND o.updated_at <= ?
-                    GROUP BY oi.name ORDER BY sales DESC LIMIT 15
+                    WHERE o.business_type = ?
+                      AND o.status = 'paid'
+                      AND COALESCE(o.paid_at, o.updated_at) >= ?
+                      AND COALESCE(o.paid_at, o.updated_at) < ?
+                    GROUP BY oi.menu_item_id, oi.name
+                    ORDER BY sales DESC, qty DESC
+                    LIMIT 15
                     """,
-                    (btype, threshold, ts),
+                    (btype, start_ts, end_ts),
                 ))
-                
+
                 stock_stats = dict(conn.execute(
                     """
-                    SELECT 
-                        COALESCE(SUM(stock_qty * cost_cents), 0) as inventory_value,
-                        COALESCE(SUM(stock_qty * (price_cents - cost_cents)), 0) as potential_profit
-                    FROM menu_items mi JOIN categories c ON c.id = mi.category_id
+                    SELECT
+                        COALESCE(SUM(mi.stock_qty * mi.cost_cents), 0) AS inventory_value,
+                        COALESCE(SUM(mi.stock_qty * (mi.price_cents - mi.cost_cents)), 0) AS potential_profit
+                    FROM menu_items mi
+                    JOIN categories c ON c.id = mi.category_id
                     WHERE mi.active = 1 AND mi.stock_qty > 0 AND c.business_type = ?
-                    """, (btype,)
+                    """,
+                    (btype,),
                 ).fetchone())
-                
-                self.send_json({"totals": totals, "payments": payments, "top_items": top_items, "period": period, "stock": stock_stats})
+
+                self.send_json({
+                    "totals": totals,
+                    "payments": payments,
+                    "top_items": top_items,
+                    "period": period,
+                    "range": {"start": start_ts, "end": end_ts, "label": range_label, "timezone": "Africa/Nairobi"},
+                    "stock": stock_stats,
+                })
             elif path == "/api/admin/summary":
                 if not self.require_manager(user):
                     return
@@ -1595,10 +1649,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                 else:
                     conn.execute(
                         """
-                        INSERT INTO order_items(order_id, menu_item_id, name, qty, unit_price_cents, line_total_cents, note, variant_info, batch_no)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO order_items(order_id, menu_item_id, name, qty, unit_price_cents, line_total_cents, note, variant_info, batch_no, cost_cents)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (order_id, item["id"], item["name"], qty, unit_price, int(round(qty * unit_price)), note, variant_info, batch_no),
+                        (order_id, item["id"], item["name"], qty, unit_price, int(round(qty * unit_price)), note, variant_info, batch_no, item["cost_cents"]),
                     )
                 recalc_order(conn, order_id)
                 self.send_json(get_order_payload(conn, order_id))
@@ -1694,9 +1748,10 @@ class POSHandler(SimpleHTTPRequestHandler):
                             (customer_name.strip() or "Customer", customer_phone, "Saved from POS checkout", btype),
                         )
 
+                paid_ts = now()
                 conn.execute(
-                    "UPDATE orders SET status = 'paid', paid_cents = ?, payment_method = ?, payment_ref = ?, customer_name = ?, updated_at = ? WHERE id = ?",
-                    (order["total_cents"], payment_method, payment_ref, customer_name, now(), order_id),
+                    "UPDATE orders SET status = 'paid', paid_cents = ?, payment_method = ?, payment_ref = ?, customer_name = ?, paid_at = COALESCE(paid_at, ?), updated_at = ? WHERE id = ?",
+                    (order["total_cents"], payment_method, payment_ref, customer_name, paid_ts, paid_ts, order_id),
                 )
                 self.send_json(get_order_payload(conn, order_id))
             elif path == "/api/order/status":
@@ -1931,16 +1986,16 @@ class POSHandler(SimpleHTTPRequestHandler):
         ))
 
     def admin_summary(self, conn, business_type):
-        day_start = now() - 86400
-        week_start = now() - 604800
+        day_start, day_end, _ = report_period_bounds("today")
+        week_start, week_end, _ = report_period_bounds("week")
         totals = dict(conn.execute(
             """
             SELECT
-              COUNT(CASE WHEN status = 'paid' AND updated_at >= ? THEN 1 END) AS paid_today,
-              COALESCE(SUM(CASE WHEN status = 'paid' AND updated_at >= ? THEN total_cents END), 0) AS sales_today,
+              COUNT(CASE WHEN status = 'paid' AND COALESCE(paid_at, updated_at) >= ? THEN 1 END) AS paid_today,
+              COALESCE(SUM(CASE WHEN status = 'paid' AND COALESCE(paid_at, updated_at) >= ? THEN total_cents END), 0) AS sales_today,
               COUNT(CASE WHEN status IN ('open','sent') THEN 1 END) AS unpaid_orders,
               COALESCE(SUM(CASE WHEN status IN ('open','sent') THEN total_cents END), 0) AS unpaid_total,
-              COALESCE(SUM(CASE WHEN status = 'paid' AND updated_at >= ? THEN total_cents END), 0) AS sales_week
+              COALESCE(SUM(CASE WHEN status = 'paid' AND COALESCE(paid_at, updated_at) >= ? THEN total_cents END), 0) AS sales_week
             FROM orders WHERE business_type = ?
             """,
             (day_start, day_start, week_start, business_type),
@@ -1949,7 +2004,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             """
             SELECT u.full_name AS employee, COUNT(o.id) AS orders, COALESCE(SUM(o.total_cents), 0) AS sales
             FROM orders o JOIN users u ON u.id = o.created_by
-            WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ?
+            WHERE o.business_type = ? AND o.status = 'paid' AND COALESCE(o.paid_at, o.updated_at) >= ?
             GROUP BY u.id, u.full_name ORDER BY sales DESC LIMIT 8
             """, (business_type, week_start),
         ))
@@ -1957,7 +2012,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             """
             SELECT COALESCE(payment_method, 'unknown') AS method, COUNT(*) AS count, COALESCE(SUM(total_cents), 0) AS sales
             FROM orders
-            WHERE business_type = ? AND status = 'paid' AND updated_at >= ?
+            WHERE business_type = ? AND status = 'paid' AND COALESCE(paid_at, updated_at) >= ?
             GROUP BY payment_method ORDER BY sales DESC
             """, (business_type, week_start),
         ))
@@ -1965,7 +2020,7 @@ class POSHandler(SimpleHTTPRequestHandler):
             """
             SELECT oi.name, SUM(oi.qty) AS qty, SUM(oi.line_total_cents) AS sales
             FROM order_items oi JOIN orders o ON o.id = oi.order_id
-            WHERE o.business_type = ? AND o.status = 'paid' AND o.updated_at >= ?
+            WHERE o.business_type = ? AND o.status = 'paid' AND COALESCE(o.paid_at, o.updated_at) >= ?
             GROUP BY oi.name ORDER BY sales DESC LIMIT 8
             """, (business_type, week_start),
         ))
@@ -1979,9 +2034,9 @@ class POSHandler(SimpleHTTPRequestHandler):
         ).fetchone())
         sales_trend = rows(conn.execute(
             """
-            SELECT strftime('%Y-%m-%d', updated_at, 'unixepoch', 'localtime') AS day, COALESCE(SUM(total_cents), 0) AS sales
+            SELECT strftime('%Y-%m-%d', COALESCE(paid_at, updated_at) + 10800, 'unixepoch') AS day, COALESCE(SUM(total_cents), 0) AS sales
             FROM orders
-            WHERE business_type = ? AND status = 'paid' AND updated_at >= ?
+            WHERE business_type = ? AND status = 'paid' AND COALESCE(paid_at, updated_at) >= ?
             GROUP BY day ORDER BY day ASC
             """, (business_type, week_start)
         ))
