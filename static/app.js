@@ -1203,7 +1203,9 @@ function renderTicket() {
         <div class="ticket-right">
           <div class="qty-controls">
             <button data-qty="${Math.max(0, (item.qty - 1))}" data-id="${item.id}">−</button>
-            <strong>${item.qty}</strong>
+            ${(dbItem.decimal_qty_enabled || hasCap('decimal_qty'))
+              ? `<input type="number" class="cart-qty-input" data-id="${item.id}" value="${item.qty}" min="0.01" step="0.01" inputmode="decimal" style="width:64px;text-align:center;padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-weight:700;">`
+              : `<strong>${item.qty}</strong>`}
             <button data-qty="${item.qty + 1}" data-id="${item.id}">+</button>
             <button class="remove-btn" data-qty="0" data-id="${item.id}">×</button>
           </div>
@@ -1216,6 +1218,24 @@ function renderTicket() {
   qsa('.qty-controls button').forEach(btn =>
     btn.addEventListener('click', () => changeQty(Number(btn.dataset.id), Number(btn.dataset.qty)))
   );
+  qsa('.cart-qty-input').forEach(input => {
+    const applyQty = () => {
+      const qty = Number.parseFloat(input.value);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        toast('Enter a quantity greater than 0', 'error');
+        renderTicket();
+        return;
+      }
+      changeQty(Number(input.dataset.id), Math.round(qty * 100) / 100);
+    };
+    input.addEventListener('change', applyQty);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      }
+    });
+  });
 
   foot.innerHTML = `
     ${isQuote ? `<div class="quote-banner" style="background:#eff6ff; border:1px dashed #3b82f6; border-radius:8px; padding:8px; text-align:center; font-size:12px; font-weight:800; color:#1d4ed8; margin-bottom:10px;">📋 ESTIMATE / QUOTATION</div>` : ''}
