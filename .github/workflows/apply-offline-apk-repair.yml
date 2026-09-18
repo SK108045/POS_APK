@@ -18,6 +18,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fix one-time repair script substitutions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/repair_offline_apk.py')
+          s = p.read_text()
+          s = s.replace("app = pattern.sub(localpos + '\\n', app, count=1)", "app = pattern.sub(lambda _m: localpos + '\\n', app, count=1)")
+          s = s.replace("app = pos_pat.sub(pos_layout + '\\nfunction getCategoryIcon', app, count=1)", "app = pos_pat.sub(lambda _m: pos_layout + '\\nfunction getCategoryIcon', app, count=1)")
+          p.write_text(s)
+          PY
+
       - name: Apply repair
         run: python3 tools/repair_offline_apk.py
 
