@@ -60,6 +60,27 @@ def rows(cursor):
     return [dict(row) for row in cursor.fetchall()]
 
 
+def normalize_customer_phone(value):
+    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+    if not digits:
+        return ''
+    if len(digits) == 10 and digits.startswith('0'):
+        digits = '254' + digits[1:]
+    elif len(digits) == 9 and digits[0] in ('7', '1'):
+        digits = '254' + digits
+    return digits
+
+
+def find_customer_by_phone(conn, value):
+    target = normalize_customer_phone(value)
+    if not target:
+        return None
+    for row in conn.execute("SELECT id, name, phone FROM customers").fetchall():
+        if normalize_customer_phone(row['phone']) == target:
+            return row
+    return None
+
+
 def init_db():
     DATA_DIR.mkdir(exist_ok=True)
     with db() as conn:
@@ -507,10 +528,10 @@ def hidden_admin_page():
     <aside class="sidebar">
       <div class="sidebar-brand">
         <div class="logo">
-          <div class="logo-icon">B</div>
-          <span class="name">EITY FIT</span>
+          <div class="logo-icon" id="adminBusinessIcon">🛒</div>
+          <span class="name" id="adminBusinessName">POS</span>
         </div>
-        <div class="tag">Admin Portal</div>
+        <div class="tag" id="adminPortalTag">Admin Portal</div>
         <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
           <span></span><span></span><span></span>
         </button>
@@ -526,7 +547,7 @@ def hidden_admin_page():
         </div>
         <div class="nav-item" data-section="menu">
           <span class="nav-icon">&#9646;</span>
-          <span class="nav-label">Products</span>
+          <span class="nav-label" id="adminProductsLabel">Products</span>
         </div>
         <div class="nav-item" data-section="customers">
           <span class="nav-icon">&#9646;</span>
@@ -1504,6 +1525,10 @@ class POSHandler(SimpleHTTPRequestHandler):
 
                 payment_method = data.get("payment_method", "cash")
                 payment_ref = data.get("payment_ref", "").strip()
+                customer_phone = normalize_customer_phone(data.get("customer_phone", ""))
+                if payment_method == "mpesa":
+                    payment_ref = normalize_customer_phone(payment_ref) or payment_ref
+                    customer_phone = customer_phone or normalize_customer_phone(payment_ref)
                 customer_name = order["customer_name"]
 
                 if payment_method == "mpesa" and payment_ref:
@@ -1543,18 +1568,21 @@ class POSHandler(SimpleHTTPRequestHandler):
                     # except Exception as e:
                     #     return self.send_json({"error": "Connection to Paystack failed: " + str(e)}, 500)
 
-                    # Auto-save customer
-                    customer = conn.execute("SELECT id, name FROM customers WHERE phone = ?", (payment_ref,)).fetchone()
+                    # Save the M-Pesa/STK phone into Customers after a successful payment.
+                    customer = find_customer_by_phone(conn, payment_ref)
                     if not customer:
-                        conn.execute("INSERT INTO customers(name, phone, notes) VALUES ('Temp', ?, 'Auto-saved from M-Pesa purchase')", (payment_ref,))
-                        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        new_name = f"Customer {new_id}"
-                        conn.execute("UPDATE customers SET name = ? WHERE id = ?", (new_name, new_id))
-                        if not customer_name:
-                            customer_name = new_name
-                    else:
-                        if not customer_name:
-                            customer_name = customer["name"]
+                        conn.execute(
+                            "INSERT INTO customers(name, phone, notes) VALUES (?, ?, ?)",
+                            (customer_name.strip() or "Customer", normalize_customer_phone(payment_ref), "Auto-saved from M-Pesa purchase"),
+                        )
+
+                if payment_method != "mpesa" and customer_phone:
+                    customer = find_customer_by_phone(conn, customer_phone)
+                    if not customer:
+                        conn.execute(
+                            "INSERT INTO customers(name, phone, notes) VALUES (?, ?, ?)",
+                            (customer_name.strip() or "Customer", customer_phone, "Saved from POS checkout"),
+                        )
 
                 conn.execute(
                     "UPDATE orders SET status = 'paid', paid_cents = ?, payment_method = ?, payment_ref = ?, customer_name = ?, updated_at = ? WHERE id = ?",

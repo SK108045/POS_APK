@@ -1296,6 +1296,12 @@ function showCheckoutModal(order) {
       <p style="font-size: 18px; font-weight: bold; margin-bottom: 20px;">Total: ${money(order.total_cents)}</p>
       
       <div style="margin-bottom: 16px;">
+        <label style="display:block; margin-bottom: 8px; font-weight: 600;">Customer Phone <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+        <input type="tel" id="checkoutCustomerPhone" class="field" placeholder="e.g. 0712345678" style="width: 100%; padding: 10px;" autocomplete="tel">
+        <small style="display:block;margin-top:6px;color:var(--muted);">If entered, the number is saved to Customers after payment. M-Pesa uses its payment phone automatically.</small>
+      </div>
+
+      <div style="margin-bottom: 16px;">
         <label style="display:block; margin-bottom: 8px; font-weight: 600;">Payment Method</label>
         <select id="checkoutMethod" class="field" style="width: 100%; padding: 10px;">
           <option value="cash">Cash</option>
@@ -1304,7 +1310,7 @@ function showCheckoutModal(order) {
       </div>
 
       <div id="mpesaRefContainer" style="display: none; margin-bottom: 16px;">
-        <label style="display:block; margin-bottom: 8px; font-weight: 600;">MPESA No</label>
+        <label style="display:block; margin-bottom: 8px; font-weight: 600;">M-Pesa / STK Phone</label>
         <input type="text" id="mpesaRef" class="field" placeholder="e.g. 0712345678" style="width: 100%; padding: 10px;" autocomplete="off">
       </div>
 
@@ -1321,6 +1327,7 @@ function showCheckoutModal(order) {
   const methodSelect = overlay.querySelector('#checkoutMethod');
   const refContainer = overlay.querySelector('#mpesaRefContainer');
   const refInput = overlay.querySelector('#mpesaRef');
+  const customerPhoneInput = overlay.querySelector('#checkoutCustomerPhone');
 
   methodSelect.addEventListener('change', () => {
     if (methodSelect.value === 'mpesa') {
@@ -1340,9 +1347,10 @@ function showCheckoutModal(order) {
     msgEl.textContent = '';
     const method = methodSelect.value;
     const ref = refInput.value.trim();
+    const customerPhone = (customerPhoneInput?.value || '').trim() || (method === 'mpesa' ? ref : '');
     if (method === 'mpesa' && !ref) {
       msgEl.style.color = 'var(--danger)';
-      msgEl.textContent = 'Please enter MPESA No.';
+      msgEl.textContent = 'Please enter the M-Pesa / STK phone number.';
       return;
     }
     
@@ -1352,7 +1360,7 @@ function showCheckoutModal(order) {
     try {
       const paidOrder = await api('/api/order/pay', {
         method: 'POST',
-        body: { order_id: order.id, payment_method: method, payment_ref: ref }
+        body: { order_id: order.id, payment_method: method, payment_ref: ref, customer_phone: customerPhone }
       });
       
       if (method === 'mpesa') {

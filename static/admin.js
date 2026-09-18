@@ -115,7 +115,7 @@ function buildDashboard(s) {
     <div class="page-header">
       <div class="page-header-left">
         <h1>Dashboard</h1>
-        <p>Live business overview for EITY FIT Retail POS</p>
+        <p>Live business overview for ${state.settings?.business_name || state.profile?.name || 'this business'}</p>
       </div>
       <button class="btn btn-ghost btn-sm" onclick="renderDashboard()">Refresh</button>
     </div>
@@ -729,40 +729,40 @@ async function adjustStock(productId, direction) {
 // ── WHATSAPP PROMOTIONS ──────────────────────────────────────────────────────
 const PROMO_PROFILE_COPY = {
   retail: {
-    general: 'We have useful everyday products, fresh stock and great value waiting for you. Drop by and see what is available today.',
-    stock: 'New stock has just arrived. If there is something you have been looking for, reply here and we can confirm availability.',
-    offer: 'We are running a special offer for our customers. Reply here for the current deals or visit us while the offer lasts.',
-    comeback: 'It has been a little while since we saw you. We would love to welcome you back and help you with your next shop.'
+    general: 'Thanks for shopping with us! We have fresh stock and great value in store, and we would love to see you again soon.',
+    stock: 'New stock has arrived! Drop by and check out what is new in store.',
+    offer: 'We have a special offer running in store. Visit us and enjoy the deal while it lasts.',
+    comeback: 'It has been a while since your last visit. We would love to welcome you back soon.'
   },
   pharmacy: {
-    general: 'We are here for your everyday pharmacy, wellness and personal-care needs. Reply here if you would like to check whether an item is available.',
-    stock: 'We have received new pharmacy, wellness and personal-care stock. Reply here and we can confirm availability before you visit.',
-    offer: 'We have selected in-store offers on eligible wellness and personal-care items. Reply here for details.',
-    comeback: 'We have not seen you in a while. If you need to check availability of any pharmacy, wellness or personal-care item, reply here and we will assist.'
+    general: 'Thanks for choosing us. We are here whenever you need pharmacy, wellness and personal-care essentials. We look forward to serving you again.',
+    stock: 'Fresh pharmacy, wellness and personal-care stock is now available. Feel free to check with us before your next visit.',
+    offer: 'We have special offers on selected wellness and personal-care items. Visit us for the current deals.',
+    comeback: 'We would be happy to serve you again. Visit us whenever you need your pharmacy, wellness or personal-care essentials.'
   },
   restaurant: {
-    general: 'We would love to have you back for a meal. Come by for your favourites and today’s menu options.',
-    stock: 'There are fresh menu options and favourites available today. Reply here if you would like to know what is on the menu.',
-    offer: 'We have a special food offer available for our customers. Reply here for the details or come by and enjoy it.',
-    comeback: 'We have missed serving you. Come back for a meal soon — we would be happy to have you again.'
+    general: 'Thanks for dining with us! We would love to have you back for another meal. Come by and enjoy your favourites again soon.',
+    stock: 'Fresh dishes and your favourites are waiting for you. Come by and enjoy a great meal with us.',
+    offer: 'We have a special food offer available. Come by and enjoy it while it lasts.',
+    comeback: 'We miss having you around! Come back for another meal soon — we would love to serve you again.'
   },
   hardware: {
-    general: 'We have hardware, tools and building supplies ready for your next job. Reply here if you want us to check stock or prepare a quotation.',
-    stock: 'New hardware and building-material stock has arrived. Reply with what you need and we can confirm availability or prepare a quotation.',
-    offer: 'We have a special deal on selected hardware and building supplies. Reply here for pricing and availability.',
-    comeback: 'Planning another project? We would be happy to help with your hardware list, stock checks and quotations.'
+    general: 'Thanks for shopping with us! For your next project, we are ready with hardware, tools and building supplies. Send us your list anytime and we will help you check availability or prepare a quote.',
+    stock: 'New hardware and building-material stock has arrived. Send us your list or visit us to check availability.',
+    offer: 'We have a special deal on selected hardware and building supplies. Visit us for the current prices and offers.',
+    comeback: 'Planning another project? We are ready to help with your hardware list, stock checks and quotations.'
   },
   boutique: {
-    general: 'We have fashion, beauty and cosmetics picks you may like. Come by and see what is available, or reply here for details.',
-    stock: 'New arrivals are in. Reply here if you want to check sizes, colours, shades or availability before visiting.',
-    offer: 'We have a special offer on selected fashion, beauty and cosmetics items. Reply here for the current deals.',
-    comeback: 'We have missed you. Come see the latest arrivals, colours and styles when you get a chance.'
+    general: 'Thanks for shopping with us! New styles, colours and beauty picks are always coming in. We would love to see you again soon.',
+    stock: 'New arrivals are in! Come by and check out the latest styles, colours, sizes and beauty picks.',
+    offer: 'We have a special offer on selected fashion, beauty and cosmetics items. Visit us and enjoy the deal while it lasts.',
+    comeback: 'It has been a while since your last visit. Come see the latest arrivals — we would love to have you back.'
   },
   bar: {
-    general: 'We have a great atmosphere, food and refreshments waiting for you. Come by and enjoy your next outing with us.',
-    stock: 'There is something fresh happening at the venue. Reply here for today’s updates, food options and event information.',
-    offer: 'We have a special venue offer available. Reply here for the details and current terms.',
-    comeback: 'It has been a while since your last visit. We would be glad to welcome you back for a good time with us.'
+    general: 'Thanks for spending time with us! We would love to have you back for another good time. See you again soon.',
+    stock: 'There is something fresh happening at the venue. Come by for good vibes, refreshments and a great time.',
+    offer: 'We have a special offer at the venue. Come through and enjoy it while it lasts.',
+    comeback: 'It has been a while since your last visit. Come through again soon — we would love to have you back.'
   }
 };
 
@@ -785,14 +785,14 @@ function promoTemplateBody(type, campaign) {
 
 function makePromoTemplate(type, campaign, businessName) {
   const body = promoTemplateBody(type, campaign);
-  return `Hi {name} 👋\n\n${businessName} here. ${body}\n\nReply to this WhatsApp if you would like more details.\n\nIf you would rather not receive promotional messages from us, reply STOP.`;
+  return `${body}
+
+— ${businessName}`;
 }
 
 function personalizePromoMessage(template, customer) {
   const businessName = state.promoSettings?.business_name || 'Our business';
-  return String(template || '')
-    .replaceAll('{name}', customer?.name || 'there')
-    .replaceAll('{business_name}', businessName);
+  return String(template || '').replaceAll('{business_name}', businessName);
 }
 
 async function renderPromotions() {
@@ -852,7 +852,7 @@ function buildPromotions() {
 
           <label class="form-label" style="margin-top:14px">Message</label>
           <textarea class="form-input promo-message-editor" id="promoMessageEditor">${promoEscape(initial)}</textarea>
-          <div class="promo-hint">Use <code>{name}</code> for the customer's name and <code>{business_name}</code> for the business name.</div>
+          <div class="promo-hint">Edit the message however you like before opening WhatsApp.</div>
 
           <div class="promo-actions">
             <button class="btn btn-ghost" id="promoResetBtn">Reset Template</button>
@@ -1040,7 +1040,6 @@ function buildCustomers() {
               <td>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                   <button class="btn btn-ghost btn-sm" onclick="editCustomer(${c.id})">Edit</button>
-                  <a class="btn btn-primary btn-sm" href="https://wa.me/${c.phone.replace(/\+/g,'').replace(/^0/, '254')}?text=Thank%20you%20for%20shopping%20at%20EITY%20FIT%21%20We%20value%20your%20business." target="_blank" style="text-decoration:none; display:inline-flex;">Send PR Message</a>
                 </div>
               </td>
             </tr>
@@ -1115,7 +1114,23 @@ async function boot() {
   const data = await api('/api/bootstrap');
   if (!data) return;
   state.user = data.user;
+  state.settings = data.settings || {};
+  state.profile = data.profile || {};
   if (state.user.role !== 'manager') { location.href = '/admin'; return; }
+
+  const businessName = state.settings.business_name || state.profile.name || 'POS';
+  const profileName = state.profile.name || 'Business';
+  const businessIcon = state.profile.icon || '🏪';
+  const itemLabel = state.profile.item_label || 'Products';
+  const businessNameEl = $('#adminBusinessName');
+  const businessIconEl = $('#adminBusinessIcon');
+  const portalTagEl = $('#adminPortalTag');
+  const productsLabelEl = $('#adminProductsLabel');
+  if (businessNameEl) businessNameEl.textContent = businessName;
+  if (businessIconEl) businessIconEl.textContent = businessIcon;
+  if (portalTagEl) portalTagEl.textContent = `${profileName} Admin`;
+  if (productsLabelEl) productsLabelEl.textContent = itemLabel;
+  document.title = `${businessName} — Admin Portal`;
   // render user info in sidebar
   $('#userDisplayName').textContent = state.user.name;
   $('#userAvatarLetter').textContent = (state.user.name||'A')[0].toUpperCase();
