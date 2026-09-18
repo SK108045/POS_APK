@@ -171,6 +171,19 @@ function hasCap(capName) {
   return Boolean(state.capabilities && state.capabilities[capName]);
 }
 
+function syncActiveTopNav(path = window.location.pathname) {
+  const navRoot = qs('#topNav') || qs('header nav');
+  if (!navRoot) return;
+  const currentPath = (path || '/pos').replace(/\/+$/, '') || '/pos';
+  qsa('.nav-link', navRoot).forEach(link => {
+    const linkPath = new URL(link.href, window.location.origin).pathname.replace(/\/+$/, '') || '/';
+    const active = linkPath === currentPath;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+}
+
 function updateHeaderAndNav() {
   const bLogo = qs('.brand-logo');
   if (bLogo && state.profile && state.profile.icon) bLogo.textContent = state.profile.icon;
@@ -264,13 +277,37 @@ function updateHeaderAndNav() {
     navItems.push({ icon: '📊', label: 'Reports', href: '/reports' });
     navItems.push({ icon: '⚙️', label: 'Settings', href: '/settings' });
 
-    const currentPath = (window.location.pathname || '/pos').replace(/\/+$/, '') || '/pos';
-    navRoot.innerHTML = navItems.map(item => {
-      const itemPath = item.href.replace(/\/+$/, '') || '/';
-      const isActive = itemPath === currentPath;
-      return `<a class="nav-link ${isActive ? 'active' : ''}" href="${item.href}" ${isActive ? 'aria-current="page"' : ''}><span class="nav-icon">${item.icon}</span>${item.label}</a>`;
-    }).join('');
+    navRoot.innerHTML = navItems.map(item =>
+      `<a class="nav-link" href="${item.href}"><span class="nav-icon">${item.icon}</span>${item.label}</a>`
+    ).join('');
+    syncActiveTopNav();
   }
+}
+
+if (!window.__posActiveNavRouterHooked) {
+  window.__posActiveNavRouterHooked = true;
+  const originalPushState = history.pushState.bind(history);
+  const originalReplaceState = history.replaceState.bind(history);
+
+  history.pushState = (...args) => {
+    const result = originalPushState(...args);
+    queueMicrotask(() => syncActiveTopNav());
+    return result;
+  };
+
+  history.replaceState = (...args) => {
+    const result = originalReplaceState(...args);
+    queueMicrotask(() => syncActiveTopNav());
+    return result;
+  };
+
+  window.addEventListener('popstate', () => queueMicrotask(() => syncActiveTopNav()));
+  document.addEventListener('click', event => {
+    const link = event.target.closest?.('#topNav .nav-link, header nav .nav-link');
+    if (!link) return;
+    const path = new URL(link.href, window.location.origin).pathname;
+    syncActiveTopNav(path);
+  });
 }
 
 async function api(path, options = {}) {
