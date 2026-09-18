@@ -32,6 +32,40 @@ STORE_NAME = "NIGHTCLUB"
 STORE_TAGLINE = "Bar & Club POS"
 
 
+def africastalking_sms_config():
+    """Return SMS configuration without ever exposing the API key to the browser."""
+    import os
+
+    username = os.environ.get("AFRICASTALKING_USERNAME", "sk10").strip() or "sk10"
+    api_key = os.environ.get("AFRICASTALKING_API_KEY", "").strip()
+    if not api_key:
+        key_file = BASE_DIR / "api.txt"
+        if key_file.exists():
+            api_key = key_file.read_text(encoding="utf-8").strip()
+
+    demo_number = os.environ.get("AFRICASTALKING_DEMO_NUMBER", "+254756205063").strip() or "+254756205063"
+    return {
+        "username": username,
+        "api_key": api_key,
+        "demo_number": demo_number,
+        "configured": bool(username and api_key),
+    }
+
+
+def send_africastalking_sms(message, recipients):
+    cfg = africastalking_sms_config()
+    if not cfg["configured"]:
+        raise RuntimeError("Africa's Talking API key is not configured on the server")
+
+    try:
+        import africastalking
+    except ImportError as exc:
+        raise RuntimeError("Africa's Talking package is not installed. Run pip install -r requirements.txt") from exc
+
+    africastalking.initialize(cfg["username"], cfg["api_key"])
+    return africastalking.SMS.send(message, recipients, timeout=30)
+
+
 def now():
     return int(time.time())
 
@@ -667,7 +701,7 @@ def hidden_admin_page(business_type="retail"):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__SHOP_NAME__ — Admin Portal</title>
-  <link rel="stylesheet" href="/static/admin.css?v=1782846743.6849699">
+  <link rel="stylesheet" href="/static/admin.css?v=__ASSET_VERSION__">
   <script>
     (function() {
       var t = localStorage.getItem('pos_theme') || 'light';
@@ -708,7 +742,7 @@ def hidden_admin_page(business_type="retail"):
         </div>
         <div class="nav-item" data-section="promotions">
           <span class="nav-icon">&#9646;</span>
-          <span class="nav-label">WhatsApp Promotions</span>
+          <span class="nav-label">Customer Marketing</span>
         </div>
         <div class="nav-item" data-section="pos">
           <span class="nav-icon">&#9646;</span>
@@ -745,7 +779,7 @@ def hidden_admin_page(business_type="retail"):
   <!-- TOAST CONTAINER -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <script src="/static/admin.js?v=1782848139.5770284" defer></script>
+  <script src="/static/admin.js?v=__ASSET_VERSION__" defer></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
       const shell = document.querySelector('.admin-shell');
@@ -760,7 +794,8 @@ def hidden_admin_page(business_type="retail"):
 </html>"""
     return (html
             .replace("__SHOP_ICON__", profile.get("icon", "🏪"))
-            .replace("__SHOP_NAME__", profile.get("name", business_type)))
+            .replace("__SHOP_NAME__", profile.get("name", business_type))
+            .replace("__ASSET_VERSION__", str(int(time.time()))))
 
 
 def page(title, active, content, role=None, settings=None):
@@ -1539,6 +1574,17 @@ class POSHandler(SimpleHTTPRequestHandler):
                 self.send_json(self.admin_summary(conn, btype))
             elif path == "/api/admin/customers":
                 self.send_json(rows(conn.execute("SELECT * FROM customers WHERE business_type = ? ORDER BY name", (btype,))))
+            elif path == "/api/admin/sms/config":
+                if not self.require_manager(user):
+                    return
+                sms_cfg = africastalking_sms_config()
+                self.send_json({
+                    "provider": "Africa's Talking",
+                    "configured": sms_cfg["configured"],
+                    "username": sms_cfg["username"],
+                    "demo_mode": True,
+                    "demo_number": sms_cfg["demo_number"],
+                })
             elif path == "/api/admin/users":
                 if not self.require_manager(user):
                     return
@@ -1911,6 +1957,36 @@ class POSHandler(SimpleHTTPRequestHandler):
                         (name, phone, email, notes, btype),
                     )
                 self.send_json(rows(conn.execute("SELECT * FROM customers WHERE business_type = ? ORDER BY name", (btype,))))
+            elif path == "/api/admin/sms/send":
+                if not self.require_manager(user):
+                    return
+                message = str(data.get("message", "")).strip()
+                if not message:
+                    return self.send_json({"error": "Write an SMS message first"}, 400)
+                if len(message) > 1000:
+                    return self.send_json({"error": "SMS message is too long (maximum 1000 characters)"}, 400)
+
+                sms_cfg = africastalking_sms_config()
+                demo_number = sms_cfg["demo_number"]
+                try:
+                    result = send_africastalking_sms(message, [demo_number])
+                except Exception as exc:
+                    # Never return credentials or configuration internals to the browser.
+                    error_text = str(exc).replace(sms_cfg.get("api_key", ""), "***")
+                    return self.send_json({"error": error_text[:300] or "SMS send failed"}, 502)
+
+                sms_data = result.get("SMSMessageData", {}) if isinstance(result, dict) else {}
+                recipients = sms_data.get("Recipients", []) if isinstance(sms_data, dict) else []
+                recipient_result = recipients[0] if recipients else {}
+                self.send_json({
+                    "ok": True,
+                    "provider": "Africa's Talking",
+                    "demo_mode": True,
+                    "recipient": demo_number,
+                    "status": recipient_result.get("status") or sms_data.get("Message") or "Sent",
+                    "message_id": recipient_result.get("messageId") or recipient_result.get("message_id"),
+                    "cost": recipient_result.get("cost"),
+                })
             elif path == "/api/stock/adjust":
                 if not self.require_manager(user):
                     return

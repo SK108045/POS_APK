@@ -796,13 +796,15 @@ async function renderPromotions() {
   const sec = $('#sec-promotions');
   sec.innerHTML = `<div class="loading-overlay"><div class="loading-spinner"></div> Loading customers…</div>`;
   try {
-    const [customers, settingsPayload] = await Promise.all([
+    const [customers, settingsPayload, smsConfig] = await Promise.all([
       api('/api/admin/customers'),
-      api('/api/settings')
+      api('/api/settings'),
+      api('/api/admin/sms/config')
     ]);
     state.promoCustomers = (customers || []).filter(c => String(c.phone || '').trim());
     state.promoSettings = settingsPayload?.settings || {};
     state.promoProfile = settingsPayload?.profile || {};
+    state.smsConfig = smsConfig || {};
     state.promoSelected = new Set();
     buildPromotions();
   } catch (e) {
@@ -820,8 +822,8 @@ function buildPromotions() {
   sec.innerHTML = `
     <div class="page-header">
       <div class="page-header-left">
-        <h1>WhatsApp Promotions</h1>
-        <p>Customer promotions tailored for ${promoEscape(profileName)}</p>
+        <h1>Customer Marketing</h1>
+        <p>WhatsApp and SMS promotions tailored for ${promoEscape(profileName)}</p>
       </div>
       <button class="btn btn-ghost btn-sm" id="promoRefreshBtn">Refresh Customers</button>
     </div>
@@ -849,11 +851,12 @@ function buildPromotions() {
 
           <label class="form-label" style="margin-top:14px">Message</label>
           <textarea class="form-input promo-message-editor" id="promoMessageEditor">${promoEscape(initial)}</textarea>
-          <div class="promo-hint">Edit the message however you like before opening WhatsApp.</div>
+          <div class="promo-hint">Edit the message however you like. The same campaign text can be used for WhatsApp or SMS.</div>
 
+          <div class="promo-hint" id="promoSmsCharCount" style="margin-top:8px">0 characters · 1 SMS segment</div>
           <div class="promo-actions">
             <button class="btn btn-ghost" id="promoResetBtn">Reset Template</button>
-            <button class="btn btn-primary" id="promoPrepareBtn">Prepare Selected Messages</button>
+            <button class="btn btn-primary" id="promoPrepareBtn">Prepare WhatsApp Messages</button>
           </div>
         </div>
       </div>
@@ -875,6 +878,28 @@ function buildPromotions() {
       </div>
     </div>
 
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">SMS Marketing · Africa's Talking</div>
+          <div class="panel-subtitle">Live SMS sending from the POS server</div>
+        </div>
+        <span class="badge badge-active">DEMO MODE</span>
+      </div>
+      <div class="panel-body">
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:end">
+          <div>
+            <div class="form-label">Demo recipient</div>
+            <div style="font-size:16px;font-weight:800;margin-top:4px" id="promoSmsRecipient">${promoEscape(state.smsConfig?.demo_number || '+254756205063')}</div>
+            <div class="promo-hint" style="margin-top:8px">For now SMS is locked to this demo Airtel number so a marketing test cannot accidentally message your saved customers. The message comes from the campaign editor above.</div>
+            <div class="promo-hint" style="margin-top:5px">Provider status: <strong>${state.smsConfig?.configured ? 'Configured' : 'API key not configured on server'}</strong></div>
+          </div>
+          <button class="btn btn-primary" id="promoSmsSendBtn" ${state.smsConfig?.configured ? '' : 'disabled'}>Send Demo SMS</button>
+        </div>
+        <div id="promoSmsStatus" style="margin-top:12px"></div>
+      </div>
+    </div>
+
     <div class="panel promo-queue-panel" id="promoQueuePanel" style="display:none">
       <div class="panel-header">
         <div>
@@ -893,6 +918,9 @@ function buildPromotions() {
   $('#promoCampaignType').addEventListener('change', resetPromoTemplate);
   $('#promoResetBtn').addEventListener('click', resetPromoTemplate);
   $('#promoPrepareBtn').addEventListener('click', preparePromoQueue);
+  $('#promoMessageEditor').addEventListener('input', updatePromoSmsCounter);
+  $('#promoSmsSendBtn')?.addEventListener('click', sendPromoSmsDemo);
+  updatePromoSmsCounter();
   $('#promoSelectAll').addEventListener('change', e => {
     $$('.promo-customer-check').forEach(cb => {
       cb.checked = e.target.checked;
@@ -910,6 +938,44 @@ function resetPromoTemplate() {
   const campaign = $('#promoCampaignType')?.value || 'general';
   const editor = $('#promoMessageEditor');
   if (editor) editor.value = makePromoTemplate(type, campaign, businessName);
+  updatePromoSmsCounter();
+}
+
+function updatePromoSmsCounter() {
+  const editor = $('#promoMessageEditor');
+  const label = $('#promoSmsCharCount');
+  if (!editor || !label) return;
+  const length = editor.value.length;
+  const segments = Math.max(1, Math.ceil(length / 160));
+  label.textContent = `${length} characters · ${segments} SMS segment${segments === 1 ? '' : 's'}`;
+}
+
+async function sendPromoSmsDemo() {
+  const editor = $('#promoMessageEditor');
+  const button = $('#promoSmsSendBtn');
+  const status = $('#promoSmsStatus');
+  const message = editor?.value?.trim() || '';
+  if (!message) {
+    toast('Write a promotion message first.', 'error');
+    return;
+  }
+  const number = state.smsConfig?.demo_number || '+254756205063';
+  if (!confirm(`Send this live SMS through Africa's Talking to ${number}?`)) return;
+
+  const oldText = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = 'Sending…'; }
+  if (status) status.innerHTML = `<span style="color:var(--muted)">Sending through Africa's Talking…</span>`;
+  try {
+    const result = await api('/api/admin/sms/send', { method:'POST', body:{ message } });
+    const detail = [result.status, result.cost].filter(Boolean).join(' · ');
+    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#dcfce7;color:#166534;font-weight:700">✓ SMS sent to ${promoEscape(result.recipient || number)}${detail ? ` · ${promoEscape(detail)}` : ''}</div>`;
+    toast('Demo SMS sent successfully');
+  } catch (e) {
+    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#fee2e2;color:#991b1b;font-weight:700">${promoEscape(e.message)}</div>`;
+    toast(e.message, 'error');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = oldText || 'Send Demo SMS'; }
+  }
 }
 
 function renderPromoCustomerRows(filter = '') {
@@ -945,7 +1011,7 @@ function renderPromoCustomerRows(filter = '') {
 
 function updatePromoSelectionCount() {
   const btn = $('#promoPrepareBtn');
-  if (btn) btn.textContent = `Prepare Selected Messages (${state.promoSelected?.size || 0})`;
+  if (btn) btn.textContent = `Prepare WhatsApp Messages (${state.promoSelected?.size || 0})`;
 }
 
 function preparePromoQueue() {
