@@ -219,9 +219,10 @@ nav {
 .nav-link:hover .nav-icon { opacity: 1; }
 
 .nav-link.active {
-  background: #18181b;
-  color: #ffffff !important;
-  font-weight: 700;
+  background: #e4e4e7;
+  color: #18181b !important;
+  font-weight: 800;
+  box-shadow: inset 0 0 0 1px #d4d4d8;
 }
 
 [data-theme="dark"] .nav-link {
@@ -232,9 +233,9 @@ nav {
   color: var(--ink);
 }
 [data-theme="dark"] .nav-link.active {
-  background: #27272a;
-  color: #ffffff !important;
-  box-shadow: inset 0 0 0 1px #3f3f46;
+  background: #3f3f46;
+  color: #fafafa !important;
+  box-shadow: inset 0 0 0 1px #52525b;
 }
 
 .nav-link.active .nav-icon { opacity: 1; }

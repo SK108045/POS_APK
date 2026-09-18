@@ -264,10 +264,12 @@ function updateHeaderAndNav() {
     navItems.push({ icon: '📊', label: 'Reports', href: '/reports' });
     navItems.push({ icon: '⚙️', label: 'Settings', href: '/settings' });
 
-    const activeLabel = pageName() ? (SPA_PAGES['/' + pageName()]?.active || 'POS') : 'POS';
-    navRoot.innerHTML = navItems.map(item =>
-      `<a class="nav-link ${activeLabel === item.label ? 'active' : ''}" href="${item.href}"><span class="nav-icon">${item.icon}</span>${item.label}</a>`
-    ).join('');
+    const currentPath = (window.location.pathname || '/pos').replace(/\/+$/, '') || '/pos';
+    navRoot.innerHTML = navItems.map(item => {
+      const itemPath = item.href.replace(/\/+$/, '') || '/';
+      const isActive = itemPath === currentPath;
+      return `<a class="nav-link ${isActive ? 'active' : ''}" href="${item.href}" ${isActive ? 'aria-current="page"' : ''}><span class="nav-icon">${item.icon}</span>${item.label}</a>`;
+    }).join('');
   }
 }
 
