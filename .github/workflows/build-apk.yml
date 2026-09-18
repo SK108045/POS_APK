@@ -38,14 +38,14 @@ jobs:
       - name: Cache npm packages
         uses: actions/cache@v4
         with:
-          path: capacitor/node_modules
-          key: npm-${{ runner.os }}-${{ hashFiles('capacitor/package.json') }}
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('capacitor/package-lock.json') }}
           restore-keys: |
             npm-${{ runner.os }}-
 
       - name: Install Capacitor dependencies
         working-directory: capacitor
-        run: npm install
+        run: npm ci
 
       - name: Add Android platform
         working-directory: capacitor
@@ -69,6 +69,8 @@ jobs:
         working-directory: capacitor/android
         env:
           JAVA_HOME: ${{ env.JAVA_HOME }}
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1
