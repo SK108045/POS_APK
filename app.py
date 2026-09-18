@@ -1576,8 +1576,7 @@ class POSHandler(SimpleHTTPRequestHandler):
                     "provider": "Africa's Talking",
                     "configured": sms_cfg["configured"],
                     "username": sms_cfg["username"],
-                    "demo_mode": True,
-                    "demo_number": sms_cfg["demo_number"],
+                    "bulk_enabled": True,
                 })
             elif path == "/api/admin/users":
                 if not self.require_manager(user):
@@ -1960,26 +1959,78 @@ class POSHandler(SimpleHTTPRequestHandler):
                 if len(message) > 1000:
                     return self.send_json({"error": "SMS message is too long (maximum 1000 characters)"}, 400)
 
-                sms_cfg = africastalking_sms_config()
-                demo_number = sms_cfg["demo_number"]
+                raw_ids = data.get("customer_ids") or []
+                if not isinstance(raw_ids, list):
+                    return self.send_json({"error": "Select customers before sending SMS"}, 400)
                 try:
-                    result = send_africastalking_sms(message, [demo_number])
+                    customer_ids = sorted({int(value) for value in raw_ids if int(value) > 0})
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "Invalid customer selection"}, 400)
+                if not customer_ids:
+                    return self.send_json({"error": "Select at least one customer first"}, 400)
+                if len(customer_ids) > 200:
+                    return self.send_json({"error": "Send to at most 200 customers at a time"}, 400)
+
+                placeholders = ",".join("?" for _ in customer_ids)
+                selected_customers = rows(conn.execute(
+                    f"SELECT id, name, phone FROM customers WHERE business_type = ? AND id IN ({placeholders}) ORDER BY name",
+                    [btype] + customer_ids,
+                ))
+
+                recipients = []
+                seen = set()
+                skipped = 0
+                for customer in selected_customers:
+                    digits = "".join(ch for ch in str(customer.get("phone") or "") if ch.isdigit())
+                    if len(digits) == 10 and digits.startswith("0"):
+                        digits = "254" + digits[1:]
+                    elif len(digits) == 9 and digits[:1] in ("7", "1"):
+                        digits = "254" + digits
+                    phone = "+" + digits if 10 <= len(digits) <= 15 else ""
+                    if not phone or phone in seen:
+                        skipped += 1
+                        continue
+                    seen.add(phone)
+                    recipients.append(phone)
+
+                if not recipients:
+                    return self.send_json({"error": "None of the selected customers has a valid phone number"}, 400)
+
+                sms_cfg = africastalking_sms_config()
+                try:
+                    result = send_africastalking_sms(message, recipients)
                 except Exception as exc:
-                    # Never return credentials or configuration internals to the browser.
                     error_text = str(exc).replace(sms_cfg.get("api_key", ""), "***")
                     return self.send_json({"error": error_text[:300] or "SMS send failed"}, 502)
 
                 sms_data = result.get("SMSMessageData", {}) if isinstance(result, dict) else {}
-                recipients = sms_data.get("Recipients", []) if isinstance(sms_data, dict) else []
-                recipient_result = recipients[0] if recipients else {}
+                provider_recipients = sms_data.get("Recipients", []) if isinstance(sms_data, dict) else []
+                results = []
+                sent = 0
+                for item in provider_recipients:
+                    status = str(item.get("status") or "")
+                    status_code = item.get("statusCode")
+                    if status.lower() in ("success", "sent") or status_code == 100:
+                        sent += 1
+                    results.append({
+                        "number": item.get("number"),
+                        "status": status or "Unknown",
+                        "status_code": status_code,
+                        "message_id": item.get("messageId") or item.get("message_id"),
+                        "cost": item.get("cost"),
+                    })
+
                 self.send_json({
                     "ok": True,
                     "provider": "Africa's Talking",
-                    "demo_mode": True,
-                    "recipient": demo_number,
-                    "status": recipient_result.get("status") or sms_data.get("Message") or "Sent",
-                    "message_id": recipient_result.get("messageId") or recipient_result.get("message_id"),
-                    "cost": recipient_result.get("cost"),
+                    "selected": len(customer_ids),
+                    "matched": len(selected_customers),
+                    "total": len(recipients),
+                    "sent": sent,
+                    "failed": max(0, len(recipients) - sent),
+                    "skipped": skipped,
+                    "message": sms_data.get("Message") if isinstance(sms_data, dict) else "",
+                    "results": results,
                 })
             elif path == "/api/stock/adjust":
                 if not self.require_manager(user):

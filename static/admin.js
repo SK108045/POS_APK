@@ -882,19 +882,19 @@ function buildPromotions() {
       <div class="panel-header">
         <div>
           <div class="panel-title">SMS Marketing · Africa's Talking</div>
-          <div class="panel-subtitle">Live SMS sending from the POS server</div>
+          <div class="panel-subtitle">Send the campaign above to the same customers you select for WhatsApp.</div>
         </div>
-        <span class="badge badge-active">DEMO MODE</span>
+        <span class="badge badge-active">LIVE</span>
       </div>
       <div class="panel-body">
         <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:end">
           <div>
-            <div class="form-label">Demo recipient</div>
-            <div style="font-size:16px;font-weight:800;margin-top:4px" id="promoSmsRecipient">${promoEscape(state.smsConfig?.demo_number || '+254756205063')}</div>
-            <div class="promo-hint" style="margin-top:8px">For now SMS is locked to this demo Airtel number so a marketing test cannot accidentally message your saved customers. The message comes from the campaign editor above.</div>
+            <div class="form-label">Selected customers</div>
+            <div style="font-size:16px;font-weight:800;margin-top:4px"><span id="promoSmsSelectedCount">${state.promoSelected?.size || 0}</span> selected</div>
+            <div class="promo-hint" style="margin-top:8px">SMS uses the message in the campaign editor above and the phone numbers saved on the selected customer records.</div>
             <div class="promo-hint" style="margin-top:5px">Provider status: <strong>${state.smsConfig?.configured ? 'Configured' : 'API key not configured on server'}</strong></div>
           </div>
-          <button class="btn btn-primary" id="promoSmsSendBtn" ${state.smsConfig?.configured ? '' : 'disabled'}>Send Demo SMS</button>
+          <button class="btn btn-primary" id="promoSmsSendBtn" ${state.smsConfig?.configured && state.promoSelected?.size ? '' : 'disabled'}>Send SMS to Selected (${state.promoSelected?.size || 0})</button>
         </div>
         <div id="promoSmsStatus" style="margin-top:12px"></div>
       </div>
@@ -919,7 +919,7 @@ function buildPromotions() {
   $('#promoResetBtn').addEventListener('click', resetPromoTemplate);
   $('#promoPrepareBtn').addEventListener('click', preparePromoQueue);
   $('#promoMessageEditor').addEventListener('input', updatePromoSmsCounter);
-  $('#promoSmsSendBtn')?.addEventListener('click', sendPromoSmsDemo);
+  $('#promoSmsSendBtn')?.addEventListener('click', sendPromoSmsSelected);
   updatePromoSmsCounter();
   $('#promoSelectAll').addEventListener('change', e => {
     $$('.promo-customer-check').forEach(cb => {
@@ -950,31 +950,41 @@ function updatePromoSmsCounter() {
   label.textContent = `${length} characters · ${segments} SMS segment${segments === 1 ? '' : 's'}`;
 }
 
-async function sendPromoSmsDemo() {
+async function sendPromoSmsSelected() {
   const editor = $('#promoMessageEditor');
   const button = $('#promoSmsSendBtn');
   const status = $('#promoSmsStatus');
   const message = editor?.value?.trim() || '';
+  const ids = [...(state.promoSelected || [])];
+
+  if (!ids.length) {
+    toast('Select at least one customer first.', 'info');
+    return;
+  }
   if (!message) {
     toast('Write a promotion message first.', 'error');
     return;
   }
-  const number = state.smsConfig?.demo_number || '+254756205063';
-  if (!confirm(`Send this live SMS through Africa's Talking to ${number}?`)) return;
+
+  const customers = ids.map(id => state.promoCustomers.find(c => Number(c.id) === Number(id))).filter(Boolean);
+  if (!confirm(`Send this SMS campaign through Africa's Talking to ${customers.length} selected customer${customers.length === 1 ? '' : 's'}?`)) return;
 
   const oldText = button?.textContent;
   if (button) { button.disabled = true; button.textContent = 'Sending…'; }
-  if (status) status.innerHTML = `<span style="color:var(--muted)">Sending through Africa's Talking…</span>`;
+  if (status) status.innerHTML = `<span style="color:var(--muted)">Sending SMS to ${customers.length} customer${customers.length === 1 ? '' : 's'}…</span>`;
+
   try {
-    const result = await api('/api/admin/sms/send', { method:'POST', body:{ message } });
-    const detail = [result.status, result.cost].filter(Boolean).join(' · ');
-    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#dcfce7;color:#166534;font-weight:700">✓ SMS sent to ${promoEscape(result.recipient || number)}${detail ? ` · ${promoEscape(detail)}` : ''}</div>`;
-    toast('Demo SMS sent successfully');
+    const result = await api('/api/admin/sms/send', { method:'POST', body:{ message, customer_ids: ids } });
+    const providerMessage = result.message ? ` · ${promoEscape(result.message)}` : '';
+    const skipped = result.skipped ? ` · ${result.skipped} skipped` : '';
+    if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#dcfce7;color:#166534;font-weight:700">✓ SMS campaign sent: ${result.sent}/${result.total} successful${skipped}${providerMessage}</div>`;
+    toast(`SMS sent to ${result.sent} customer${result.sent === 1 ? '' : 's'}`);
   } catch (e) {
     if (status) status.innerHTML = `<div style="padding:10px 12px;border-radius:8px;background:#fee2e2;color:#991b1b;font-weight:700">${promoEscape(e.message)}</div>`;
     toast(e.message, 'error');
   } finally {
-    if (button) { button.disabled = false; button.textContent = oldText || 'Send Demo SMS'; }
+    updatePromoSelectionCount();
+    if (button && !oldText) button.textContent = 'Send SMS to Selected';
   }
 }
 
@@ -994,7 +1004,7 @@ function renderPromoCustomerRows(filter = '') {
         <input type="checkbox" class="promo-customer-check" value="${Number(c.id)}" ${checked ? 'checked' : ''} ${valid ? '' : 'disabled'}>
         <div class="promo-customer-info">
           <strong>${promoEscape(c.name || 'Unnamed customer')}</strong>
-          <span>${promoEscape(c.phone || '')}${valid ? '' : ' · Invalid WhatsApp number'}</span>
+          <span>${promoEscape(c.phone || '')}${valid ? '' : ' · Invalid phone number'}</span>
         </div>
       </label>`;
   }).join('') : `<div class="empty-state"><p>No customers with phone numbers match your search.</p></div>`;
@@ -1010,8 +1020,18 @@ function renderPromoCustomerRows(filter = '') {
 }
 
 function updatePromoSelectionCount() {
+  const count = state.promoSelected?.size || 0;
   const btn = $('#promoPrepareBtn');
-  if (btn) btn.textContent = `Prepare WhatsApp Messages (${state.promoSelected?.size || 0})`;
+  if (btn) btn.textContent = `Prepare WhatsApp Messages (${count})`;
+
+  const smsCount = $('#promoSmsSelectedCount');
+  if (smsCount) smsCount.textContent = String(count);
+
+  const smsBtn = $('#promoSmsSendBtn');
+  if (smsBtn) {
+    smsBtn.textContent = `Send SMS to Selected (${count})`;
+    smsBtn.disabled = !state.smsConfig?.configured || count === 0;
+  }
 }
 
 function preparePromoQueue() {
