@@ -3,136 +3,6 @@ const moneyRaw = cents => (cents / 100).toFixed(2);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-
-// ── WhatsApp Receipt Helpers ─────────────────────────────────────────────────
-function normalizeWhatsAppPhone(value) {
-  let digits = String(value || '').replace(/\D/g, '');
-  if (!digits) return '';
-
-  // Kenyan local formats: 0712345678 / 0112345678 / 712345678 / 112345678
-  if (digits.length === 10 && digits.startsWith('0')) digits = `254${digits.slice(1)}`;
-  else if (digits.length === 9 && (digits.startsWith('7') || digits.startsWith('1'))) digits = `254${digits}`;
-
-  return digits;
-}
-
-function formatReceiptQty(value) {
-  const qty = Number(value || 0);
-  if (!Number.isFinite(qty)) return String(value || '0');
-  return qty.toFixed(3).replace(/\.?0+$/, '');
-}
-
-function formatReceiptDate(order) {
-  const timestamp = Number(order?.updated_at || order?.created_at || 0);
-  const date = timestamp > 0 ? new Date(timestamp * 1000) : new Date();
-  return date.toLocaleString('en-GB', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit'
-  });
-}
-
-function buildWhatsAppReceipt(order) {
-  const bname = state.settings?.business_name || 'POS SYSTEM';
-  const baddr = state.settings?.address || '';
-  const bphone = state.settings?.phone || '';
-  const bfooter = state.settings?.receipt_footer || 'Thank you for your business!';
-  const isQuote = Boolean(order?.is_quote || order?.order_type === 'quote');
-  const label = isQuote ? 'QUOTATION' : 'RECEIPT';
-  const lines = [`*${bname}*`];
-
-  if (baddr) lines.push(baddr);
-  if (bphone) lines.push(`Tel: ${bphone}`);
-
-  lines.push('', `*${label} #${order.ticket_no || order.id || '-'}*`);
-  lines.push(`Date: ${formatReceiptDate(order)}`);
-  if (order.customer_name) lines.push(`Customer: ${order.customer_name}`);
-  if (order.table_name) lines.push(`Table / Tab: ${order.table_name}`);
-  if (order.employee_name) lines.push(`Served by: ${order.employee_name}`);
-
-  lines.push('', '*ITEMS*');
-  (order.items || []).forEach(item => {
-    const details = [];
-    if (item.variant_info) details.push(item.variant_info);
-    if (item.batch_no) details.push(`Batch ${item.batch_no}`);
-    const suffix = details.length ? ` (${details.join(' · ')})` : '';
-    lines.push(`${formatReceiptQty(item.qty)} x ${item.name}${suffix} — KES ${moneyRaw(Number(item.line_total_cents || 0))}`);
-    if (item.note) lines.push(`  Note: ${item.note}`);
-  });
-
-  if (!(order.items || []).length) lines.push('Sale items unavailable');
-
-  lines.push('', `*TOTAL: KES ${moneyRaw(Number(order.total_cents || 0))}*`);
-
-  if (!isQuote) {
-    lines.push(`Payment: ${(order.payment_method || 'cash').toUpperCase()}`);
-    if (order.payment_ref) lines.push(`Reference: ${order.payment_ref}`);
-  }
-
-  if (bfooter) {
-    lines.push('');
-    String(bfooter).split(/\r?\n/).filter(Boolean).forEach(line => lines.push(line));
-  }
-
-  return lines.join('\n');
-}
-
-function showWhatsAppReceiptDialog(order) {
-  document.getElementById('whatsappReceiptModal')?.remove();
-
-  const isQuote = Boolean(order?.is_quote || order?.order_type === 'quote');
-  const mpesaRaw = order?.payment_method === 'mpesa' ? (order.payment_ref || '') : '';
-  const normalizedMpesa = normalizeWhatsAppPhone(mpesaRaw);
-  const mpesaPhone = normalizedMpesa.length >= 10 && normalizedMpesa.length <= 15 ? mpesaRaw : '';
-  const overlay = document.createElement('div');
-  overlay.id = 'whatsappReceiptModal';
-  overlay.className = 'qty-popup-overlay';
-  overlay.innerHTML = `
-    <div class="qty-popup" style="max-width:420px; text-align:left;">
-      <h3 style="margin-top:0">Send ${isQuote ? 'Quotation' : 'Receipt'} via WhatsApp</h3>
-      <p style="color:var(--muted); font-size:13px; line-height:1.5; margin-bottom:14px;">
-        Enter the customer's WhatsApp number. The receipt will open in WhatsApp ready to send.
-      </p>
-      <label style="display:block; margin-bottom:7px; font-weight:700;">WhatsApp Number</label>
-      <input id="whatsappReceiptPhone" class="field" type="tel" inputmode="tel"
-             placeholder="e.g. 0712345678 or +254712345678"
-             style="width:100%; padding:10px; box-sizing:border-box;">
-      <div id="whatsappReceiptError" style="min-height:20px; margin-top:7px; color:var(--danger); font-size:12px; font-weight:700;"></div>
-      <div class="qty-popup-actions" style="margin-top:14px;">
-        <button class="ghost" id="whatsappReceiptCancel">Cancel</button>
-        <button class="primary" id="whatsappReceiptSend">Open WhatsApp</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const input = overlay.querySelector('#whatsappReceiptPhone');
-  const error = overlay.querySelector('#whatsappReceiptError');
-  if (input && mpesaPhone) input.value = mpesaPhone;
-  setTimeout(() => input?.focus(), 0);
-
-  const close = () => overlay.remove();
-  overlay.querySelector('#whatsappReceiptCancel').addEventListener('click', close);
-  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-
-  const send = () => {
-    const phone = normalizeWhatsAppPhone(input.value);
-    if (phone.length < 10 || phone.length > 15) {
-      error.textContent = 'Enter a valid WhatsApp number.';
-      input.focus();
-      return;
-    }
-
-    const message = buildWhatsAppReceipt(order);
-    const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-    close();
-    toast(`${isQuote ? 'Quotation' : 'Receipt'} opened in WhatsApp`, 'success');
-  };
-
-  overlay.querySelector('#whatsappReceiptSend').addEventListener('click', send);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
-}
-
 // ── Receipt Modal ─────────────────────────────────────────────────────────────
 function showReceiptModal(order, isKot = false) {
   document.getElementById('receiptModal')?.remove();
@@ -218,10 +88,7 @@ function showReceiptModal(order, isKot = false) {
         <p class="receipt-note" style="line-height: 1.6; margin-top: 12px; white-space: pre-wrap;">
           ${bfooter}
         </p>
-        <div class="receipt-actions">
-          <button id="receiptPrintBtn">Print ${isQuote ? 'Quotation' : 'Receipt'}</button>
-          <button id="receiptWhatsAppBtn" type="button">Send via WhatsApp</button>
-        </div>
+        <button id="receiptPrintBtn">Print ${isQuote ? 'Quotation' : 'Receipt'}</button>
       </div>
     `;
   }
@@ -249,7 +116,6 @@ function showReceiptModal(order, isKot = false) {
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   document.getElementById('receiptModalClose').addEventListener('click', close);
   document.getElementById('receiptPrintBtn').addEventListener('click', () => window.print());
-  document.getElementById('receiptWhatsAppBtn')?.addEventListener('click', () => showWhatsAppReceiptDialog(order));
 
   const onKey = e => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);

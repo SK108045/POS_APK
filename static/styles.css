@@ -1098,27 +1098,6 @@ main { min-height: calc(100vh - 69px); }
   color: #ffffff;
 }
 
-.receipt-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.receipt-actions button {
-  margin: 0;
-}
-
-#receiptWhatsAppBtn {
-  background: #16a34a !important;
-  color: #ffffff !important;
-  -webkit-text-stroke: 0 !important;
-}
-
-@media (max-width: 420px) {
-  .receipt-actions { grid-template-columns: 1fr; }
-}
-
 /* ── Qty popup modal ────────────────────────────────────────────────── */
 .qty-popup-overlay {
   position: fixed;
@@ -1613,8 +1592,7 @@ main { min-height: calc(100vh - 69px); }
   .receipt .receipt-note { font-size: 11px !important; text-align: center; margin-top: 6px; }
   
   #receiptModal .receipt-modal-close,
-  #receiptModal #receiptPrintBtn,
-  #receiptModal #receiptWhatsAppBtn { display: none !important; }
+  #receiptModal #receiptPrintBtn { display: none !important; }
 }
 
 /* ── Business Settings & Profiles UI ─────────────────────────────────────── */
