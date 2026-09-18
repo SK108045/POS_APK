@@ -1,17 +1,49 @@
-__pycache__/
+# Miscellaneous
+*.class
+*.log
 *.pyc
-*.pyo
-*.pyd
-*.bak
-pos.db
-pos.log
-*.sqlite3-shm
-*.sqlite3-wal
-.env
-test_pillow_opt/
+*.swp
 .DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
 
-# Capacitor / Android build artifacts
-capacitor/node_modules/
-capacitor/android/
-capacitor/.gradle/
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+**/android/local.properties
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
