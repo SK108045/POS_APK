@@ -42,11 +42,15 @@ jobs:
           python3 -m json.tool capacitor/package.json >/dev/null
           python3 -m json.tool capacitor/capacitor.config.json >/dev/null
 
-      - name: Commit repaired APK source and remove one-time workflow
+      - name: Commit repaired APK application source
         run: |
-          rm -f tools/repair_offline_apk.py .github/workflows/apply-offline-apk-repair.yml
+          # The Actions token can push source changes, but not workflow-file changes.
+          # Restore the build workflow and leave this one-time workflow/script untouched;
+          # ChatGPT removes/updates those separately after this succeeds.
+          git checkout HEAD -- .github/workflows/build-apk.yml .github/workflows/apply-offline-apk-repair.yml tools/repair_offline_apk.py
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add .gitignore README.md capacitor
+          git add -u api.txt
           git commit -m "Repair offline mobile POS APK" || exit 0
           git push
