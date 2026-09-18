@@ -1,0 +1,13 @@
+{
+  "appId": "com.oraforge.pos",
+  "appName": "Oraforge POS",
+  "webDir": "www",
+  "server": {
+    "url": "http://3.87.19.244:5000",
+    "cleartext": true,
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
