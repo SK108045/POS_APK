@@ -192,55 +192,28 @@ function updateHeaderAndNav() {
   const bTag = qs('#brandTagline') || qs('.brand-text small');
   if (bTag && state.settings && state.settings.business_tagline) bTag.textContent = state.settings.business_tagline;
 
-  // Add/update Quick Profile Switcher in header
-  const brandEl = qs('.brand');
-  let quickWrap = qs('#quickProfileWrap');
-  if (brandEl && !quickWrap) {
-    quickWrap = document.createElement('div');
-    quickWrap.id = 'quickProfileWrap';
-    quickWrap.className = 'quick-profile-wrap';
-    quickWrap.style.cssText = 'display:flex; align-items:center; margin-left:14px;';
-    brandEl.parentNode.insertBefore(quickWrap, brandEl.nextSibling);
-  }
-  if (quickWrap && state.profiles && Object.keys(state.profiles).length > 0) {
-    const curType = state.settings?.business_type || 'bar';
-    quickWrap.innerHTML = `
-      <div style="display:flex; align-items:center; gap:6px; background:var(--bg); padding:4px 10px; border-radius:20px; border:1px solid var(--line);">
-        <span style="font-size:13px;">🏢</span>
-        <select id="quickProfileSelect" style="background:transparent; border:none; color:var(--ink); font-size:12px; font-weight:700; cursor:pointer; outline:none;" title="Quick switch business profile">
-          ${Object.entries(state.profiles).map(([k, p]) => `
-            <option value="${k}" ${k === curType ? 'selected' : ''} style="background:var(--panel); color:var(--ink);">
-              ${p.icon} ${p.name}
-            </option>
-          `).join('')}
-        </select>
-      </div>
-    `;
+  // Remove quick profile switcher from inside the portal (store selection only on login)
+  qs('#quickProfileWrap')?.remove();
 
-    qs('#quickProfileSelect')?.addEventListener('change', async (e) => {
-      const newType = e.target.value;
-      const prof = state.profiles[newType];
-      try {
-        await api('/api/settings', {
-          method: 'POST',
-          body: {
-            business_type: newType,
-            business_name: prof?.name || newType,
-            business_tagline: prof?.tagline || ''
-          }
-        });
-        toast(`Switched to ${prof?.name || newType}!`, 'success');
-        await bootstrap();
-        updateHeaderAndNav();
-        const p = pageName();
-        if (p === 'pos') posLayout();
-        else if (p === 'products') renderProductAdmin();
-        else if (p === 'settings') await renderSettings();
-        else if (p === 'stock') await renderStock();
-      } catch (err) {
-        toast(err.message, 'error');
-      }
-    });
+  // Ensure Admin Portal link is in top nav
+  const nav = qs('#topNav');
+  if (nav && !qs('#navAdminLink')) {
+    const adminLink = document.createElement('a');
+    adminLink.id = 'navAdminLink';
+    adminLink.className = 'nav-link';
+    adminLink.href = 'admin.html';
+    adminLink.innerHTML = '<span class="nav-icon">👑</span>Admin';
+    nav.appendChild(adminLink);
+  }
+
+  // Hook up Logout button to return to login screen
+  const logoutBtn = qs('.logout');
+  if (logoutBtn) {
+    logoutBtn.onclick = (e) => {
+      e.preventDefault();
+      localStorage.removeItem('pos_logged_in');
+      showLoginScreen();
+    };
   }
 
   // Setup theme toggle button in header
@@ -310,7 +283,18 @@ if (!window.__posActiveNavRouterHooked) {
   });
 }
 
-// ── Local Offline POS Storage (for standalone APK & offline fallback) ────────
+// ── Full Profiles Data & Local Offline POS Storage ───────────────────────────
+const LOCAL_PROFILES_DATA = {"profiles":{"retail":{"id":"retail","name":"Retail / Mini-Mart","tagline":"Supermarket, Grocery & General Retail POS","icon":"\ud83d\uded2","item_label":"Products","order_type_default":"walk-in","capabilities":{"barcode":true,"stock_tracking":true,"reorder_levels":true,"suppliers":true,"tables":false,"waiters":false,"kot":false,"batches_expiry":false,"decimal_qty":false,"units_extended":false,"quotations":true,"wholesale_pricing":false,"variants":false,"order_notes":false,"order_types":["walk-in","quote","delivery"]}},"pharmacy":{"id":"pharmacy","name":"Pharmacy","tagline":"Pharmacy & Chemist POS","icon":"\ud83d\udc8a","item_label":"Medicines","order_type_default":"walk-in","capabilities":{"barcode":true,"stock_tracking":true,"reorder_levels":true,"suppliers":true,"tables":false,"waiters":false,"kot":false,"batches_expiry":true,"decimal_qty":false,"units_extended":false,"quotations":false,"wholesale_pricing":false,"variants":false,"order_notes":true,"order_types":["walk-in","prescription","delivery"]}},"restaurant":{"id":"restaurant","name":"Restaurant / Caf\u00e9","tagline":"Food, Dining & Kitchen POS","icon":"\ud83c\udf7d\ufe0f","item_label":"Menu Items","order_type_default":"dine-in","capabilities":{"barcode":false,"stock_tracking":true,"reorder_levels":false,"suppliers":true,"tables":true,"waiters":true,"kot":true,"batches_expiry":false,"decimal_qty":false,"units_extended":false,"quotations":false,"wholesale_pricing":false,"variants":false,"order_notes":true,"order_types":["dine-in","takeaway","delivery"]}},"hardware":{"id":"hardware","name":"Hardware","tagline":"Hardware, Building Materials & Tools POS","icon":"\ud83d\udd27","item_label":"Hardware Items","order_type_default":"walk-in","capabilities":{"barcode":true,"stock_tracking":true,"reorder_levels":true,"suppliers":true,"tables":false,"waiters":false,"kot":false,"batches_expiry":false,"decimal_qty":true,"units_extended":true,"quotations":true,"wholesale_pricing":true,"variants":false,"order_notes":true,"order_types":["walk-in","quote","delivery"]}},"boutique":{"id":"boutique","name":"Boutique / Cosmetics","tagline":"Fashion, Beauty & Cosmetics POS","icon":"\ud83d\udc57","item_label":"Apparel & Beauty","order_type_default":"walk-in","capabilities":{"barcode":true,"stock_tracking":true,"reorder_levels":true,"suppliers":true,"tables":false,"waiters":false,"kot":false,"batches_expiry":false,"decimal_qty":false,"units_extended":false,"quotations":false,"wholesale_pricing":false,"variants":true,"order_notes":false,"order_types":["walk-in","layaway","delivery"]}},"bar":{"id":"bar","name":"Bar / Nightclub","tagline":"Bar, Lounge & Club POS","icon":"\ud83c\udf78","item_label":"Drinks & Snacks","order_type_default":"dine-in","capabilities":{"barcode":true,"stock_tracking":true,"reorder_levels":false,"suppliers":true,"tables":true,"waiters":true,"kot":true,"batches_expiry":false,"decimal_qty":false,"units_extended":false,"quotations":false,"wholesale_pricing":false,"variants":false,"order_notes":true,"order_types":["dine-in","bar-tab","takeaway"]}}},"sample_data":{"pharmacy":{"categories":["Pain & Fever Relief","Antibiotics & Prescriptions","Cough, Cold & Flu","Vitamins & Supplements","First Aid & Antiseptics"],"items":[{"category":"Pain & Fever Relief","name":"Paracetamol 500mg Tablets","price":100,"cost":60,"sku":"PHARM-001","barcode":"616120100001","stock":80,"unit":"strip","reorder_level":15,"batch_no":"B4829","expiry_date":"2027-11-30","manufacturer":"Dawa Ltd","strength":"500mg","image_url":"/static/uploads/sample_paracetamol.jpg","color":"#0e7490"},{"category":"Antibiotics & Prescriptions","name":"Amoxicillin 500mg Capsules","price":350,"cost":220,"sku":"PHARM-002","barcode":"616120100002","stock":40,"unit":"strip","reorder_level":10,"batch_no":"AM912","expiry_date":"2027-08-15","manufacturer":"Cosmos Ltd","strength":"500mg","image_url":"/static/uploads/sample_amoxicillin.jpg","color":"#0d9488"},{"category":"Cough, Cold & Flu","name":"Cough Relief Syrup 100ml","price":280,"cost":180,"sku":"PHARM-003","barcode":"616120100003","stock":24,"unit":"btl","reorder_level":6,"batch_no":"CR104","expiry_date":"2026-12-31","manufacturer":"Regal Pharma","strength":"100ml","image_url":"/static/uploads/sample_cough_syrup.jpg","color":"#b45309"},{"category":"Cough, Cold & Flu","name":"Cetirizine 10mg Tablets","price":150,"cost":90,"sku":"PHARM-004","barcode":"616120100004","stock":50,"unit":"strip","reorder_level":10,"batch_no":"CT553","expiry_date":"2027-05-20","manufacturer":"GlaxoSmithKline","strength":"10mg","image_url":"/static/uploads/sample_cetirizine.jpg","color":"#0284c7"},{"category":"Vitamins & Supplements","name":"Multivitamin Effervescent 20s","price":650,"cost":450,"sku":"PHARM-005","barcode":"616120100005","stock":18,"unit":"tube","reorder_level":5,"batch_no":"MV771","expiry_date":"2028-01-10","manufacturer":"Bayer","strength":"20 tabs","image_url":"/static/uploads/sample_multivitamin.jpg","color":"#d97706"},{"category":"First Aid & Antiseptics","name":"Povidone Iodine 100ml","price":220,"cost":140,"sku":"PHARM-006","barcode":"616120100006","stock":30,"unit":"btl","reorder_level":8,"batch_no":"PI302","expiry_date":"2027-04-01","manufacturer":"Medilab","strength":"10%","image_url":"/static/uploads/sample_iodine.jpg","color":"#9f1239"}]},"hardware":{"categories":["Cement & Building","Fasteners & Fixings","Paints & Finishes","Plumbing","Hand Tools","Electrical"],"items":[{"category":"Cement & Building","name":"Simba Portland Cement 50kg","price":750,"wholesale_price":680,"cost":620,"sku":"HDW-001","barcode":"616130100001","stock":120,"unit":"bag","reorder_level":25,"decimal_qty_enabled":0,"image_url":"/static/uploads/sample_cement.jpg","color":"#475569"},{"category":"Fasteners & Fixings","name":"Steel Wire Nails 3-inch","price":180,"wholesale_price":150,"cost":120,"sku":"HDW-002","barcode":"616130100002","stock":250,"unit":"kg","reorder_level":30,"decimal_qty_enabled":1,"image_url":"/static/uploads/sample_nails.jpg","color":"#64748b"},{"category":"Paints & Finishes","name":"Crown Vinyl Gloss Paint White 4L","price":2400,"wholesale_price":2100,"cost":1800,"sku":"HDW-003","barcode":"616130100003","stock":30,"unit":"tin","reorder_level":5,"decimal_qty_enabled":0,"image_url":"/static/uploads/sample_paint.jpg","color":"#ea580c"},{"category":"Plumbing","name":"PPR Plumbing Pipe 1/2-inch","price":120,"wholesale_price":95,"cost":80,"sku":"HDW-004","barcode":"616130100004","stock":300,"unit":"metre","reorder_level":50,"decimal_qty_enabled":1,"image_url":"/static/uploads/sample_pipe.jpg","color":"#10b981"},{"category":"Hand Tools","name":"Heavy Duty Claw Hammer 16oz","price":850,"wholesale_price":720,"cost":550,"sku":"HDW-005","barcode":"616130100005","stock":15,"unit":"pcs","reorder_level":4,"decimal_qty_enabled":0,"image_url":"/static/uploads/sample_hammer.jpg","color":"#1e293b"},{"category":"Electrical","name":"Twin & Earth Electric Cable 2.5mm","price":160,"wholesale_price":135,"cost":110,"sku":"HDW-006","barcode":"616130100006","stock":500,"unit":"metre","reorder_level":100,"decimal_qty_enabled":1,"image_url":"/static/uploads/sample_cable.jpg","color":"#dc2626"}]},"boutique":{"categories":["Women's Apparel","Men's Wear","Lip & Face Beauty","Skincare","Denim & Trousers"],"items":[{"category":"Women's Apparel","name":"Floral Summer Chiffon Dress","price":2800,"cost":1600,"sku":"BTQ-001","barcode":"616140100001","stock":24,"unit":"pcs","reorder_level":6,"image_url":"/static/uploads/sample_dress.jpg","color":"#db2777","variants_json":"[{\"name\": \"S / Sky Blue\", \"size\": \"S\", \"color\": \"Sky Blue\", \"shade\": \"\", \"stock\": 6, \"price_cents\": 280000}, {\"name\": \"M / Sky Blue\", \"size\": \"M\", \"color\": \"Sky Blue\", \"shade\": \"\", \"stock\": 8, \"price_cents\": 280000}, {\"name\": \"L / Sky Blue\", \"size\": \"L\", \"color\": \"Sky Blue\", \"shade\": \"\", \"stock\": 4, \"price_cents\": 280000}, {\"name\": \"M / Rose Pink\", \"size\": \"M\", \"color\": \"Rose Pink\", \"shade\": \"\", \"stock\": 6, \"price_cents\": 280000}]"},{"category":"Men's Wear","name":"Men's Oxford Slim Fit Shirt","price":2200,"cost":1300,"sku":"BTQ-002","barcode":"616140100002","stock":30,"unit":"pcs","reorder_level":8,"image_url":"/static/uploads/sample_shirt.jpg","color":"#2563eb","variants_json":"[{\"name\": \"38 / White\", \"size\": \"38\", \"color\": \"White\", \"shade\": \"\", \"stock\": 8, \"price_cents\": 220000}, {\"name\": \"40 / White\", \"size\": \"40\", \"color\": \"White\", \"shade\": \"\", \"stock\": 10, \"price_cents\": 220000}, {\"name\": \"42 / Navy Blue\", \"size\": \"42\", \"color\": \"Navy Blue\", \"shade\": \"\", \"stock\": 12, \"price_cents\": 220000}]"},{"category":"Lip & Face Beauty","name":"Velvet Matte Longstay Lipstick","price":850,"cost":450,"sku":"BTQ-003","barcode":"616140100003","stock":45,"unit":"pcs","reorder_level":12,"image_url":"/static/uploads/sample_lipstick.jpg","color":"#be123c","variants_json":"[{\"name\": \"Ruby Red #01\", \"size\": \"\", \"color\": \"Red\", \"shade\": \"Ruby Red\", \"stock\": 15, \"price_cents\": 85000}, {\"name\": \"Velvet Nude #05\", \"size\": \"\", \"color\": \"Nude\", \"shade\": \"Velvet Nude\", \"stock\": 18, \"price_cents\": 85000}, {\"name\": \"Plum Desire #09\", \"size\": \"\", \"color\": \"Purple\", \"shade\": \"Plum Desire\", \"stock\": 12, \"price_cents\": 85000}]"},{"category":"Skincare","name":"Hydrating Glow Serum 50ml","price":1500,"cost":900,"sku":"BTQ-004","barcode":"616140100004","stock":20,"unit":"btl","reorder_level":5,"image_url":"/static/uploads/sample_serum.jpg","color":"#f59e0b"},{"category":"Denim & Trousers","name":"High-Waist Stretch Denim Jeans","price":2500,"cost":1400,"sku":"BTQ-005","barcode":"616140100005","stock":18,"unit":"pcs","reorder_level":5,"image_url":"/static/uploads/sample_jeans.jpg","color":"#1e3a8a","variants_json":"[{\"name\": \"Size 28 / Dark Wash\", \"size\": \"28\", \"color\": \"Dark Wash\", \"shade\": \"\", \"stock\": 6, \"price_cents\": 250000}, {\"name\": \"Size 30 / Dark Wash\", \"size\": \"30\", \"color\": \"Dark Wash\", \"shade\": \"\", \"stock\": 7, \"price_cents\": 250000}, {\"name\": \"Size 32 / Light Wash\", \"size\": \"32\", \"color\": \"Light Wash\", \"shade\": \"\", \"stock\": 5, \"price_cents\": 250000}]"}]},"restaurant":{"categories":["Burgers & Grills","Main Courses","Pizzas","Pasta & Bowls","Desserts","Beverages"],"items":[{"category":"Burgers & Grills","name":"Classic Beef Burger with Fries","price":650,"cost":320,"sku":"REST-001","barcode":"","stock":100,"unit":"plate","reorder_level":0,"image_url":"/static/uploads/sample_burger.jpg","color":"#b45309"},{"category":"Main Courses","name":"Grilled Herb Chicken Breast","price":850,"cost":420,"sku":"REST-002","barcode":"","stock":80,"unit":"plate","reorder_level":0,"image_url":"/static/uploads/sample_chicken.jpg","color":"#c2410c"},{"category":"Pizzas","name":"Wood-Fired Margherita Pizza","price":900,"cost":400,"sku":"REST-003","barcode":"","stock":50,"unit":"pie","reorder_level":0,"image_url":"/static/uploads/sample_pizza.jpg","color":"#dc2626"},{"category":"Pasta & Bowls","name":"Creamy Chicken Alfredo Pasta","price":750,"cost":350,"sku":"REST-004","barcode":"","stock":60,"unit":"plate","reorder_level":0,"image_url":"/static/uploads/sample_pasta.jpg","color":"#ca8a04"},{"category":"Desserts","name":"Fresh Fruit Salad & Ice Cream","price":350,"cost":150,"sku":"REST-005","barcode":"","stock":40,"unit":"bowl","reorder_level":0,"image_url":"/static/uploads/sample_fruit.jpg","color":"#10b981"},{"category":"Beverages","name":"House Cappuccino Coffee","price":280,"cost":80,"sku":"REST-006","barcode":"","stock":200,"unit":"cup","reorder_level":0,"image_url":"/static/uploads/sample_coffee.jpg","color":"#78350f"}]},"retail":{"categories":["Bakery & Bread","Dairy & Milk","Cooking Oils & Spices","Sugar, Flour & Rice","Cleaning & Household"],"items":[{"category":"Bakery & Bread","name":"Fresh Sliced White Bread 400g","price":65,"cost":50,"sku":"RET-001","barcode":"616110100001","stock":45,"unit":"loaf","reorder_level":10,"image_url":"/static/uploads/sample_bread.jpg","color":"#d97706"},{"category":"Dairy & Milk","name":"Fresh Whole Milk 500ml","price":60,"cost":45,"sku":"RET-002","barcode":"616110100002","stock":30,"unit":"pkt","reorder_level":8,"image_url":"/static/uploads/sample_milk.jpg","color":"#0ea5e9"},{"category":"Cooking Oils & Spices","name":"Pure Vegetable Cooking Oil 1L","price":290,"cost":240,"sku":"RET-003","barcode":"616110100003","stock":25,"unit":"btl","reorder_level":5,"image_url":"/static/uploads/sample_oil.jpg","color":"#eab308"},{"category":"Sugar, Flour & Rice","name":"White Sugar Refined 1kg","price":170,"cost":140,"sku":"RET-004","barcode":"616110100004","stock":50,"unit":"pkt","reorder_level":10,"image_url":"/static/uploads/sample_sugar.jpg","color":"#64748b"},{"category":"Sugar, Flour & Rice","name":"Pure Basmati Rice 2kg","price":450,"cost":370,"sku":"RET-005","barcode":"616110100005","stock":20,"unit":"bag","reorder_level":5,"image_url":"/static/uploads/sample_rice.jpg","color":"#ca8a04"},{"category":"Cleaning & Household","name":"Multi-Purpose Bar Soap 800g","price":160,"cost":130,"sku":"RET-006","barcode":"616110100006","stock":35,"unit":"bar","reorder_level":8,"image_url":"/static/uploads/sample_soap.jpg","color":"#10b981"}]},"bar":{"categories":["Beers","Cocktails","Spirits","Wines","Soft Drinks","Snacks"],"items":[{"name":"Tusker Lager 500ml","category":"Beers","price":250,"cost":200,"color":"#d97706","sku":"BE-001","stock_qty":120,"unit":"btl"},{"name":"Guinness 500ml","category":"Beers","price":300,"cost":240,"color":"#1e293b","sku":"BE-002","stock_qty":80,"unit":"btl"},{"name":"White Cap 500ml","category":"Beers","price":250,"cost":200,"color":"#94a3b8","sku":"BE-003","stock_qty":100,"unit":"btl"},{"name":"Heineken","category":"Beers","price":350,"cost":280,"color":"#15803d","sku":"BE-004","stock_qty":60,"unit":"btl"},{"name":"Mojito","category":"Cocktails","price":600,"cost":300,"color":"#22c55e","sku":"CO-001","stock_qty":999,"unit":"glass"},{"name":"Margarita","category":"Cocktails","price":650,"cost":320,"color":"#eab308","sku":"CO-002","stock_qty":999,"unit":"glass"},{"name":"Jameson 750ml","category":"Spirits","price":3500,"cost":2800,"color":"#166534","sku":"SP-001","stock_qty":12,"unit":"btl"},{"name":"Gilbeys Gin 750ml","category":"Spirits","price":1800,"cost":1400,"color":"#0ea5e9","sku":"SP-002","stock_qty":15,"unit":"btl"},{"name":"Four Cousins Sweet","category":"Wines","price":1200,"cost":900,"color":"#db2777","sku":"WI-001","stock_qty":24,"unit":"btl"},{"name":"Coca Cola 300ml","category":"Soft Drinks","price":80,"cost":50,"color":"#dc2626","sku":"SD-001","stock_qty":60,"unit":"btl"},{"name":"Roasted Peanuts","category":"Snacks","price":100,"cost":60,"color":"#d97706","sku":"SN-001","stock_qty":30,"unit":"pkt"}]}}};
+
+const SHOP_PROFILES = [
+  { id: 'retail', name: 'Retail / Mini-Mart', icon: '🛒', tagline: 'Supermarket, Grocery & General Retail POS' },
+  { id: 'pharmacy', name: 'Pharmacy & Chemist', icon: '💊', tagline: 'Pharmacy & Drugstore POS' },
+  { id: 'restaurant', name: 'Restaurant & Café', icon: '🍽️', tagline: 'Food & Dining POS' },
+  { id: 'hardware', name: 'Hardware & Tools', icon: '🔧', tagline: 'Hardware Store POS' },
+  { id: 'boutique', name: 'Boutique & Fashion', icon: '👗', tagline: 'Fashion & Cosmetics POS' },
+  { id: 'bar', name: 'Bar & Nightclub', icon: '🍸', tagline: 'Bar, Lounge & Club POS' }
+];
+
 const LocalPOS = {
   get(key, fallback) {
     try {
@@ -321,48 +305,59 @@ const LocalPOS = {
   set(key, val) {
     try { localStorage.setItem('pos_local_' + key, JSON.stringify(val)); } catch(e) {}
   },
+  switchProfile(btype) {
+    const prof = LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles['retail'];
+    const sample = LOCAL_PROFILES_DATA.sample_data[btype] || LOCAL_PROFILES_DATA.sample_data['retail'];
+
+    const cats = sample.categories.map((c, i) => ({
+      id: i + 1,
+      name: c,
+      sort_order: i,
+      business_type: btype
+    }));
+
+    const items = sample.items.map((it, i) => ({
+      id: i + 1,
+      category_id: (sample.categories.indexOf(it.category) >= 0 ? sample.categories.indexOf(it.category) + 1 : 1),
+      name: it.name,
+      price_cents: Math.round((it.price || 0) * 100),
+      cost_cents: Math.round((it.cost || 0) * 100),
+      color: it.color || "#334155",
+      sku: it.sku || `SKU-${i+1}`,
+      barcode: it.barcode || '',
+      stock_qty: it.stock_qty !== undefined ? it.stock_qty : 50,
+      unit: it.unit || "pcs",
+      image_url: it.image_url || "",
+      active: 1
+    }));
+
+    this.set('categories', cats);
+    this.set('items', items);
+    this.set('settings', {
+      business_name: prof.name + ' POS',
+      business_tagline: prof.tagline || '',
+      business_type: btype,
+      tax_rate: 16.0,
+      currency: 'KES',
+      receipt_header: 'Welcome to ' + prof.name,
+      receipt_footer: 'Thank you for your business!\n------- END OF RECEIPT -------'
+    });
+    this.set('current_profile', prof);
+    this.set('current_type', btype);
+  },
   init() {
-    if (!this.get('seeded', false)) {
-      this.set('settings', {
-        business_name: 'Oraforge POS',
-        business_tagline: 'Store & Retail POS',
-        business_type: 'bar',
-        tax_rate: 16.0,
-        currency: 'KES',
-        receipt_header: 'Welcome to Oraforge POS',
-        receipt_footer: 'Thank you for your visit!\n------- END OF RECEIPT -------'
-      });
-      this.set('categories', [
-        { id: 1, name: "Beers", sort_order: 0, business_type: "bar" },
-        { id: 2, name: "Cocktails", sort_order: 1, business_type: "bar" },
-        { id: 3, name: "Spirits", sort_order: 2, business_type: "bar" },
-        { id: 4, name: "Wines", sort_order: 3, business_type: "bar" },
-        { id: 5, name: "Soft Drinks", sort_order: 4, business_type: "bar" },
-        { id: 6, name: "Snacks", sort_order: 5, business_type: "bar" }
-      ]);
-      this.set('items', [
-        { id: 1, category_id: 1, name: "Tusker Lager 500ml", price_cents: 25000, cost_cents: 20000, color: "#d97706", sku: "BE-001", stock_qty: 120, unit: "btl", active: 1 },
-        { id: 2, category_id: 1, name: "Guinness 500ml", price_cents: 30000, cost_cents: 24000, color: "#1e293b", sku: "BE-002", stock_qty: 80, unit: "btl", active: 1 },
-        { id: 3, category_id: 1, name: "White Cap 500ml", price_cents: 25000, cost_cents: 20000, color: "#94a3b8", sku: "BE-003", stock_qty: 100, unit: "btl", active: 1 },
-        { id: 4, category_id: 1, name: "Heineken", price_cents: 35000, cost_cents: 28000, color: "#15803d", sku: "BE-004", stock_qty: 60, unit: "btl", active: 1 },
-        { id: 5, category_id: 2, name: "Mojito", price_cents: 60000, cost_cents: 30000, color: "#22c55e", sku: "CO-001", stock_qty: 999, unit: "glass", active: 1 },
-        { id: 6, category_id: 2, name: "Margarita", price_cents: 65000, cost_cents: 32000, color: "#eab308", sku: "CO-002", stock_qty: 999, unit: "glass", active: 1 },
-        { id: 7, category_id: 2, name: "Long Island", price_cents: 80000, cost_cents: 40000, color: "#ef4444", sku: "CO-003", stock_qty: 999, unit: "glass", active: 1 },
-        { id: 8, category_id: 3, name: "Jameson 750ml", price_cents: 350000, cost_cents: 280000, color: "#166534", sku: "SP-001", stock_qty: 12, unit: "btl", active: 1 },
-        { id: 9, category_id: 3, name: "Gilbeys Gin 750ml", price_cents: 180000, cost_cents: 140000, color: "#0ea5e9", sku: "SP-002", stock_qty: 15, unit: "btl", active: 1 },
-        { id: 10, category_id: 3, name: "Smirnoff Vodka", price_cents: 160000, cost_cents: 120000, color: "#ef4444", sku: "SP-003", stock_qty: 20, unit: "btl", active: 1 },
-        { id: 11, category_id: 4, name: "Four Cousins Sweet", price_cents: 120000, cost_cents: 90000, color: "#db2777", sku: "WI-001", stock_qty: 24, unit: "btl", active: 1 },
-        { id: 12, category_id: 5, name: "Coca Cola 300ml", price_cents: 8000, cost_cents: 5000, color: "#dc2626", sku: "SD-001", stock_qty: 60, unit: "btl", active: 1 },
-        { id: 13, category_id: 5, name: "Sprite 300ml", price_cents: 8000, cost_cents: 5000, color: "#16a34a", sku: "SD-002", stock_qty: 48, unit: "btl", active: 1 },
-        { id: 14, category_id: 6, name: "Roasted Peanuts", price_cents: 10000, cost_cents: 6000, color: "#d97706", sku: "SN-001", stock_qty: 30, unit: "pkt", active: 1 },
-        { id: 15, category_id: 6, name: "Potato Crisps", price_cents: 15000, cost_cents: 10000, color: "#f59e0b", sku: "SN-002", stock_qty: 20, unit: "pkt", active: 1 }
-      ]);
+    const curType = localStorage.getItem('pos_active_business_type') || this.get('current_type', 'retail');
+    if (!this.get('seeded', false) || this.get('current_type') !== curType) {
+      this.switchProfile(curType);
       this.set('orders', []);
       this.set('suppliers', [
         { id: 1, name: "East African Breweries Ltd", phone: "+254 700 111 000", email: "orders@eabl.co.ke", active: 1 },
-        { id: 2, name: "Coca-Cola Beverages Africa", phone: "+254 722 222 111", email: "supply@ccba.co.ke", active: 1 }
+        { id: 2, name: "Coca-Cola Beverages Africa", phone: "+254 722 222 111", email: "supply@ccba.co.ke", active: 1 },
+        { id: 3, name: "Local Wholesale Distributors", phone: "+254 733 444 000", email: "sales@lwd.co.ke", active: 1 }
       ]);
-      this.set('customers', []);
+      this.set('customers', [
+        { id: 1, name: "Walk-In Customer", phone: "+254 700 000 000" }
+      ]);
       this.set('seeded', true);
     }
   },
@@ -371,6 +366,8 @@ const LocalPOS = {
     const cleanPath = path.split('?')[0];
     const method = (options.method || 'GET').toUpperCase();
     const body = options.body ? (typeof options.body === 'string' ? JSON.parse(options.body) : options.body) : {};
+    const btype = this.get('current_type', 'retail');
+    const prof = this.get('current_profile', LOCAL_PROFILES_DATA.profiles[btype] || LOCAL_PROFILES_DATA.profiles['retail']);
 
     if (cleanPath === '/api/bootstrap') {
       const cats = this.get('categories', []);
@@ -378,13 +375,13 @@ const LocalPOS = {
       return {
         user: { id: 1, username: 'terminal', full_name: 'POS Terminal', role: 'cashier' },
         settings: this.get('settings', {}),
-        profile: { name: "Bar & Retail", tagline: "Oraforge POS", icon: "🛒", capabilities: { dining_tables: true } },
-        profiles: {},
-        capabilities: { dining_tables: true },
+        profile: prof,
+        profiles: LOCAL_PROFILES_DATA.profiles,
+        capabilities: prof.capabilities || {},
         employees: [{ id: 1, name: "POS Terminal" }, { id: 2, name: "The Owner" }],
         menu: { categories: cats, items: items },
         suppliers: this.get('suppliers', []),
-        tables: [{ id: 1, name: "Bar Counter", seats: 4 }, { id: 2, name: "Table 1", seats: 4 }],
+        tables: [{ id: 1, name: "Counter 1", seats: 4 }, { id: 2, name: "Counter 2", seats: 4 }],
         alerts: { expiry: 0, low_stock: 0 }
       };
     }
@@ -474,7 +471,7 @@ const LocalPOS = {
     if (cleanPath === '/api/settings' && method === 'POST') {
       const settings = { ...this.get('settings', {}), ...body };
       this.set('settings', settings);
-      return { settings, profile: { name: settings.business_name || 'POS' } };
+      return { settings, profile: prof };
     }
 
     if (cleanPath === '/api/reports') {
@@ -3043,10 +3040,177 @@ function initSPARouter() {
   });
 }
 
+
+// ── Staff Login Screen (Category Selection & PIN Verification) ─────────────────
+function showLoginScreen() {
+  let screen = qs('#posLoginScreen');
+  if (screen) screen.remove();
+
+  let selectedShop = localStorage.getItem('pos_active_business_type') || 'retail';
+
+  const renderChips = () => {
+    return SHOP_PROFILES.map(p => {
+      const isSel = p.id === selectedShop;
+      return `
+        <button type="button" class="login-shop-chip" data-id="${p.id}" style="${isSel ? 'background:var(--primary); color:var(--primary-fg); border:1px solid var(--primary); font-weight:700; box-shadow:0 1px 3px rgba(0,0,0,0.15);' : 'background:var(--panel); color:var(--ink); border:1px solid var(--line);'} padding:10px 12px; border-radius:8px; font-size:12px; cursor:pointer; display:flex; align-items:center; gap:8px; text-align:left; transition:all 0.15s ease;">
+          <span style="font-size:20px;">${p.icon}</span>
+          <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${p.name}${isSel ? ' ✓' : ''}</span>
+        </button>
+      `;
+    }).join('');
+  };
+
+  const activeProf = SHOP_PROFILES.find(p => p.id === selectedShop) || SHOP_PROFILES[0];
+
+  screen = document.createElement('div');
+  screen.id = 'posLoginScreen';
+  screen.className = 'login-body';
+  screen.style.cssText = 'position:fixed; inset:0; z-index:999999; background:var(--login-bg); display:grid; place-items:center; overflow-y:auto; padding:16px;';
+  screen.innerHTML = `
+    <div style="position:fixed; top:18px; right:18px; z-index:1000000;">
+      <button id="loginThemeToggle" class="theme-toggle-btn" style="width:40px; height:40px; font-size:18px;" title="Toggle Light / Dark theme">☀️</button>
+    </div>
+
+    <div class="login-panel" style="width:min(440px, 100%); background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); padding:24px; display:grid; gap:12px;">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
+        <div id="loginHeaderIcon" style="width:48px; height:48px; border-radius:12px; background:var(--ink); display:grid; place-items:center; font-size:26px; flex-shrink:0; box-shadow:0 2px 8px rgba(0,0,0,0.15); color:var(--panel);">
+          ${activeProf.icon}
+        </div>
+        <div>
+          <h1 id="loginHeaderTitle" style="margin:0; font-size:21px; font-weight:800; color:var(--ink);">${activeProf.name} POS</h1>
+          <p id="loginHeaderTag" style="margin:2px 0 0; color:var(--muted); font-size:12px;">${activeProf.tagline}</p>
+        </div>
+      </div>
+
+      <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:12px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+          <span style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px;">🏢 Select Shop Category</span>
+          <span style="font-size:11px; color:var(--muted); font-weight:600;">Choose before login</span>
+        </div>
+        <div id="loginChipsContainer" style="display:grid; grid-template-columns:repeat(2, 1fr); gap:6px;">
+          ${renderChips()}
+        </div>
+      </div>
+
+      <p id="loginErrorMsg" style="display:none; color:var(--danger); font-size:12px; font-weight:700; margin:0; text-align:center;"></p>
+
+      <button type="button" id="loginDemoBtn" style="width:100%; padding:12px; background:var(--primary); color:var(--primary-fg); border-radius:8px; font-weight:700; font-size:14px; border:1px solid var(--primary); cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+        <span>⚡</span> 1-Click Demo Login (PIN: 1234)
+      </button>
+
+      <div style="display:flex; align-items:center; gap:10px; margin:2px 0;">
+        <div style="flex:1; height:1px; background:var(--line);"></div>
+        <span style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px;">or enter pin on keypad</span>
+        <div style="flex:1; height:1px; background:var(--line);"></div>
+      </div>
+
+      <input id="loginPinInput" type="password" inputmode="numeric" pattern="[0-9]*" value="" placeholder="Staff PIN" style="text-align:center; font-size:22px; letter-spacing:4px; font-weight:700; width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink);">
+
+      <div class="pin-pad" id="loginPinPad" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:9px;">
+        <button type="button" data-key="1">1</button>
+        <button type="button" data-key="2">2</button>
+        <button type="button" data-key="3">3</button>
+        <button type="button" data-key="4">4</button>
+        <button type="button" data-key="5">5</button>
+        <button type="button" data-key="6">6</button>
+        <button type="button" data-key="7">7</button>
+        <button type="button" data-key="8">8</button>
+        <button type="button" data-key="9">9</button>
+        <button type="button" data-key="clear">Clear</button>
+        <button type="button" data-key="0">0</button>
+        <button type="button" data-key="enter" style="background:var(--primary); color:var(--primary-fg); border-color:var(--primary); font-size:16px;">Enter</button>
+      </div>
+
+      <div style="border-top:1px solid var(--line); margin-top:6px; padding-top:10px; display:flex; justify-content:space-between; align-items:center;">
+        <small style="color:var(--muted); font-size:12px;">Staff PIN: <strong>1234</strong></small>
+        <a href="admin.html" style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:700; color:var(--ink); background:var(--bg); border:1px solid var(--line); padding:6px 12px; border-radius:6px; text-decoration:none;">
+          <span>👑</span> Admin Portal →
+        </a>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(screen);
+
+  // Setup theme toggle
+  const loginTheme = qs('#loginThemeToggle', screen);
+  if (loginTheme) {
+    const curTheme = document.documentElement.getAttribute('data-theme') || 'light';
+    loginTheme.textContent = curTheme === 'dark' ? '☀️' : '🌙';
+    loginTheme.onclick = () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('pos_theme', next);
+      loginTheme.textContent = next === 'dark' ? '☀️' : '🌙';
+    };
+  }
+
+  // Setup category chip selection
+  const bindChips = () => {
+    qsa('.login-shop-chip', screen).forEach(btn => {
+      btn.onclick = () => {
+        selectedShop = btn.dataset.id;
+        localStorage.setItem('pos_active_business_type', selectedShop);
+        const prof = SHOP_PROFILES.find(p => p.id === selectedShop);
+        if (prof) {
+          qs('#loginHeaderIcon', screen).textContent = prof.icon;
+          qs('#loginHeaderTitle', screen).textContent = prof.name + ' POS';
+          qs('#loginHeaderTag', screen).textContent = prof.tagline;
+        }
+        qs('#loginChipsContainer', screen).innerHTML = renderChips();
+        bindChips();
+      };
+    });
+  };
+  bindChips();
+
+  const pinInput = qs('#loginPinInput', screen);
+  const doLogin = async (pin) => {
+    const errEl = qs('#loginErrorMsg', screen);
+    if (pin !== '1234' && pin.length < 4) {
+      if (errEl) { errEl.textContent = 'Invalid PIN. Use default: 1234'; errEl.style.display = 'block'; }
+      return;
+    }
+
+    localStorage.setItem('pos_logged_in', 'true');
+    localStorage.setItem('pos_active_business_type', selectedShop);
+
+    LocalPOS.switchProfile(selectedShop);
+
+    screen.remove();
+    toast(`Logged into ${SHOP_PROFILES.find(p=>p.id===selectedShop)?.name || selectedShop}!`, 'success');
+    await bootstrap();
+    updateHeaderAndNav();
+    posLayout();
+    initSPARouter();
+  };
+
+  qs('#loginDemoBtn', screen).onclick = () => doLogin('1234');
+
+  qsa('#loginPinPad button', screen).forEach(b => {
+    b.onclick = () => {
+      const k = b.dataset.key;
+      if (k === 'clear') pinInput.value = '';
+      else if (k === 'enter') doLogin(pinInput.value);
+      else if (pinInput.value.length < 8) pinInput.value += k;
+      pinInput.focus();
+    };
+  });
+
+  pinInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      doLogin(pinInput.value);
+    }
+  });
+}
+
 // ── Entry Point ───────────────────────────────────────────────────────────────
 async function start() {
-  const page = pageName();
-  if (!page) return;
+  if (localStorage.getItem('pos_logged_in') !== 'true') {
+    showLoginScreen();
+    return;
+  }
+  const page = pageName() || 'pos';
   await bootstrap();
   bootstrapped = true;
   if (page === 'pos')       posLayout();

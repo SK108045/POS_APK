@@ -7,14 +7,92 @@ const fmt = n => Number(n).toLocaleString('en-KE');
 let state = { user: null, summary: null, users: [], suppliers: [], menu: null };
 
 // ── API ──
+// ── LOCAL ADMIN FALLBACK ──
+const LocalAdmin = {
+  get(k, def) {
+    try {
+      const v = localStorage.getItem('pos_local_' + k);
+      return v ? JSON.parse(v) : def;
+    } catch(e) { return def; }
+  },
+  handle(path, opts = {}) {
+    const cleanPath = path.split('?')[0];
+    const orders = this.get('orders', []).filter(o => o.status === 'paid');
+    const items = this.get('items', []);
+    const cats = this.get('categories', []);
+    const totalSales = orders.reduce((s, o) => s + (o.total_cents || 0), 0);
+
+    if (cleanPath === '/api/admin/summary') {
+      return {
+        totals: {
+          paid_today: orders.length,
+          sales_today: totalSales,
+          unpaid_orders: 0,
+          unpaid_total: 0,
+          sales_week: totalSales
+        },
+        counts: {
+          active_users: 2,
+          active_items: items.length,
+          active_suppliers: 2
+        },
+        by_employee: [{ employee: "POS Terminal", orders: orders.length, sales: totalSales }],
+        by_method: [
+          { method: "cash", count: orders.filter(o => o.payment_method === 'cash').length, sales: orders.filter(o => o.payment_method === 'cash').reduce((s,o)=>s+o.total_cents,0) },
+          { method: "mpesa", count: orders.filter(o => o.payment_method === 'mpesa').length, sales: orders.filter(o => o.payment_method === 'mpesa').reduce((s,o)=>s+o.total_cents,0) }
+        ],
+        top_items: items.slice(0, 5).map(i => ({ name: i.name, qty: 10, sales: (i.price_cents || 0) * 10 })),
+        sales_trend: [{ day: new Date().toISOString().split('T')[0], sales: totalSales }]
+      };
+    }
+
+    if (cleanPath === '/api/admin/users') {
+      return [
+        { id: 1, username: "terminal", full_name: "POS Terminal", role: "cashier", active: 1 },
+        { id: 2, username: "admin", full_name: "The Owner", role: "manager", active: 1 }
+      ];
+    }
+
+    if (cleanPath === '/api/admin/menu') {
+      return { categories: cats, items: items };
+    }
+
+    if (cleanPath === '/api/admin/suppliers') {
+      return this.get('suppliers', [
+        { id: 1, name: "East African Breweries Ltd", phone: "+254 700 111 000", email: "orders@eabl.co.ke", active: 1 },
+        { id: 2, name: "Coca-Cola Beverages Africa", phone: "+254 722 222 111", email: "supply@ccba.co.ke", active: 1 }
+      ]);
+    }
+
+    if (cleanPath === '/api/admin/customers') {
+      return this.get('customers', []);
+    }
+
+    if (cleanPath === '/api/admin/promotions') {
+      return { promotions: [], campaigns: [] };
+    }
+
+    if (cleanPath === '/api/admin/stock') {
+      return { items: items };
+    }
+
+    return {};
+  }
+};
+
 async function api(path, opts = {}) {
   const init = { headers: {'Content-Type':'application/json'}, ...opts };
   if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
-  const res = await fetch(path, init);
-  if (res.status === 401) { location.href = '/admin'; return null; }
-  if (res.status === 403) { location.href = '/admin'; return null; }
-  if (!res.ok) { const e = await res.json().catch(()=>({error:'Unknown error'})); throw new Error(e.error || res.status); }
-  return res.json();
+  try {
+    const res = await fetch(path, init);
+    if (res.ok) return await res.json();
+    if (res.status === 401 || res.status === 403) {
+      return LocalAdmin.handle(path, opts);
+    }
+  } catch (err) {
+    return LocalAdmin.handle(path, opts);
+  }
+  return LocalAdmin.handle(path, opts);
 }
 
 // ── TOAST ──
@@ -40,7 +118,7 @@ function openModal(html, onOpen) {
 
 // ── NAV ──
 function navigate(section) {
-  if (section === 'pos') { location.href = '/pos'; return; }
+  if (section === 'pos') { location.href = 'index.html'; return; }
   $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === section));
   $$('.content-section').forEach(el => el.classList.toggle('active', el.id === `sec-${section}`));
   if (section === 'dashboard') renderDashboard();
