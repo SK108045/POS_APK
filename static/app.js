@@ -1,0 +1,2952 @@
+const money = cents => `KES ${(cents / 100).toFixed(2)}`;
+const moneyRaw = cents => (cents / 100).toFixed(2);
+const qs = (sel, root = document) => root.querySelector(sel);
+const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+
+// ── WhatsApp Receipt Helpers ─────────────────────────────────────────────────
+function normalizeWhatsAppPhone(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+
+  // Kenyan local formats: 0712345678 / 0112345678 / 712345678 / 112345678
+  if (digits.length === 10 && digits.startsWith('0')) digits = `254${digits.slice(1)}`;
+  else if (digits.length === 9 && (digits.startsWith('7') || digits.startsWith('1'))) digits = `254${digits}`;
+
+  return digits;
+}
+
+function formatReceiptQty(value) {
+  const qty = Number(value || 0);
+  if (!Number.isFinite(qty)) return String(value || '0');
+  return qty.toFixed(3).replace(/\.?0+$/, '');
+}
+
+function formatReceiptDate(order) {
+  const timestamp = Number(order?.updated_at || order?.created_at || 0);
+  const date = timestamp > 0 ? new Date(timestamp * 1000) : new Date();
+  return date.toLocaleString('en-GB', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function buildWhatsAppReceipt(order) {
+  const bname = state.settings?.business_name || 'POS SYSTEM';
+  const baddr = state.settings?.address || '';
+  const bphone = state.settings?.phone || '';
+  const bfooter = state.settings?.receipt_footer || 'Thank you for your business!';
+  const isQuote = Boolean(order?.is_quote || order?.order_type === 'quote');
+  const label = isQuote ? 'QUOTATION' : 'RECEIPT';
+  const lines = [`*${bname}*`];
+
+  if (baddr) lines.push(baddr);
+  if (bphone) lines.push(`Tel: ${bphone}`);
+
+  lines.push('', `*${label} #${order.ticket_no || order.id || '-'}*`);
+  lines.push(`Date: ${formatReceiptDate(order)}`);
+  if (order.customer_name) lines.push(`Customer: ${order.customer_name}`);
+  if (order.table_name) lines.push(`Table / Tab: ${order.table_name}`);
+  if (order.employee_name) lines.push(`Served by: ${order.employee_name}`);
+
+  lines.push('', '*ITEMS*');
+  (order.items || []).forEach(item => {
+    const details = [];
+    if (item.variant_info) details.push(item.variant_info);
+    if (item.batch_no) details.push(`Batch ${item.batch_no}`);
+    const suffix = details.length ? ` (${details.join(' · ')})` : '';
+    lines.push(`${formatReceiptQty(item.qty)} x ${item.name}${suffix} — KES ${moneyRaw(Number(item.line_total_cents || 0))}`);
+    if (item.note) lines.push(`  Note: ${item.note}`);
+  });
+
+  if (!(order.items || []).length) lines.push('Sale items unavailable');
+
+  lines.push('', `*TOTAL: KES ${moneyRaw(Number(order.total_cents || 0))}*`);
+
+  if (!isQuote) {
+    lines.push(`Payment: ${(order.payment_method || 'cash').toUpperCase()}`);
+    if (order.payment_ref) lines.push(`Reference: ${order.payment_ref}`);
+  }
+
+  if (bfooter) {
+    lines.push('');
+    String(bfooter).split(/\r?\n/).filter(Boolean).forEach(line => lines.push(line));
+  }
+
+  return lines.join('\n');
+}
+
+function showWhatsAppReceiptDialog(order) {
+  document.getElementById('whatsappReceiptModal')?.remove();
+
+  const isQuote = Boolean(order?.is_quote || order?.order_type === 'quote');
+  const mpesaRaw = order?.payment_method === 'mpesa' ? (order.payment_ref || '') : '';
+  const normalizedMpesa = normalizeWhatsAppPhone(mpesaRaw);
+  const mpesaPhone = normalizedMpesa.length >= 10 && normalizedMpesa.length <= 15 ? mpesaRaw : '';
+  const overlay = document.createElement('div');
+  overlay.id = 'whatsappReceiptModal';
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width:420px; text-align:left;">
+      <h3 style="margin-top:0">Send ${isQuote ? 'Quotation' : 'Receipt'} via WhatsApp</h3>
+      <p style="color:var(--muted); font-size:13px; line-height:1.5; margin-bottom:14px;">
+        Enter the customer's WhatsApp number. The receipt will open in WhatsApp ready to send.
+      </p>
+      <label style="display:block; margin-bottom:7px; font-weight:700;">WhatsApp Number</label>
+      <input id="whatsappReceiptPhone" class="field" type="tel" inputmode="tel"
+             placeholder="e.g. 0712345678 or +254712345678"
+             style="width:100%; padding:10px; box-sizing:border-box;">
+      <div id="whatsappReceiptError" style="min-height:20px; margin-top:7px; color:var(--danger); font-size:12px; font-weight:700;"></div>
+      <div class="qty-popup-actions" style="margin-top:14px;">
+        <button class="ghost" id="whatsappReceiptCancel">Cancel</button>
+        <button class="primary" id="whatsappReceiptSend">Open WhatsApp</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector('#whatsappReceiptPhone');
+  const error = overlay.querySelector('#whatsappReceiptError');
+  if (input && mpesaPhone) input.value = mpesaPhone;
+  setTimeout(() => input?.focus(), 0);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('#whatsappReceiptCancel').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  const send = () => {
+    const phone = normalizeWhatsAppPhone(input.value);
+    if (phone.length < 10 || phone.length > 15) {
+      error.textContent = 'Enter a valid WhatsApp number.';
+      input.focus();
+      return;
+    }
+
+    const message = buildWhatsAppReceipt(order);
+    const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    close();
+    toast(`${isQuote ? 'Quotation' : 'Receipt'} opened in WhatsApp`, 'success');
+  };
+
+  overlay.querySelector('#whatsappReceiptSend').addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+}
+
+// ── Receipt Modal ─────────────────────────────────────────────────────────────
+function showReceiptModal(order, isKot = false) {
+  document.getElementById('receiptModal')?.remove();
+
+  const bname = state.settings?.business_name || 'POS SYSTEM';
+  const baddr = state.settings?.address || '';
+  const bphone = state.settings?.phone || '';
+  const bfooter = state.settings?.receipt_footer || 'Thank you for your business!\n------- END OF RECEIPT -------';
+  const isQuote = Boolean(order.is_quote || order.order_type === 'quote');
+
+  let bodyHtml = '';
+  if (isKot) {
+    const itemRows = (order.items || []).map(item =>
+      `<tr>
+        <td>
+          <strong>${item.qty} x ${item.name}</strong>
+          ${item.variant_info ? `<br><small style="color:#666">[${item.variant_info}]</small>` : ''}
+          ${item.note ? `<br><small style="color:#2563eb">* ${item.note}</small>` : ''}
+        </td>
+      </tr>`
+    ).join('');
+
+    bodyHtml = `
+      <div class="receipt">
+        <h1 style="font-size:18px;">*** KITCHEN / BAR ORDER ***</h1>
+        <p>Ticket: <strong>#${order.ticket_no}</strong></p>
+        <div style="border-top: 2px dashed var(--line); margin: 10px 0;"></div>
+        <div class="receipt-line"><span>Table / Tab</span><strong>${order.table_name || 'Counter'}</strong></div>
+        <div class="receipt-line"><span>Server</span><strong>${order.employee_name || '-'}</strong></div>
+        <div class="receipt-line"><span>Time</span><strong>${new Date().toLocaleTimeString()}</strong></div>
+        ${order.notes ? `<div class="receipt-line"><span>Note</span><strong>${order.notes}</strong></div>` : ''}
+        <div style="border-top: 2px dashed var(--line); margin: 10px 0;"></div>
+        <table><tbody>${itemRows}</tbody></table>
+        <div style="border-top: 2px dashed var(--line); margin: 10px 0;"></div>
+        <button id="receiptPrintBtn">Print KOT</button>
+      </div>
+    `;
+  } else {
+    const itemRows = (order.items || []).map(item =>
+      `<tr>
+        <td>
+          ${item.qty} x ${item.name}
+          ${item.variant_info ? `<br><small style="color:#666">${item.variant_info}</small>` : ''}
+          ${item.batch_no ? `<br><small style="color:#666">Batch: ${item.batch_no}</small>` : ''}
+          ${item.note ? `<br><small style="color:#2563eb">Note: ${item.note}</small>` : ''}
+        </td>
+        <td style="text-align:right;">${moneyRaw(item.line_total_cents)}</td>
+      </tr>`
+    ).join('');
+
+    const taxRate = parseFloat(state.settings?.tax_rate || 16.0);
+    const multiplier = 1.0 + (taxRate / 100.0);
+    const exclVat = taxRate > 0 ? (order.total_cents / multiplier) : order.total_cents;
+    const vatAmount = taxRate > 0 ? (order.total_cents - exclVat) : 0;
+
+    bodyHtml = `
+      <div class="receipt">
+        <h1>${bname}</h1>
+        ${baddr ? `<p>${baddr}</p>` : ''}
+        ${bphone ? `<p>Tel: ${bphone}</p>` : ''}
+        <h2 style="font-size: 15px; margin: 12px 0 8px; font-weight: 800;">* ${isQuote ? 'QUOTATION / ESTIMATE' : 'ORIGINAL RECEIPT'} *</h2>
+        <div class="receipt-line"><span>Date</span><strong>${new Date().toLocaleString('en-GB', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'})}</strong></div>
+        <div class="receipt-line"><span>Ref #</span><strong>${order.ticket_no}</strong></div>
+        ${order.table_name ? `<div class="receipt-line"><span>Table / Tab</span><strong>${order.table_name}</strong></div>` : ''}
+        <div class="receipt-line"><span>Type</span><strong>${(order.order_type || 'sale').toUpperCase()}</strong></div>
+        ${order.customer_name ? `<div class="receipt-line"><span>Customer</span><strong>${order.customer_name}</strong></div>` : ''}
+        <div class="receipt-line"><span>Served By</span><strong>${order.employee_name || '-'}</strong></div>
+        <div class="receipt-line"><span>Status</span><strong>${order.status.toUpperCase()}</strong></div>
+        <div style="border-top: 1px dashed var(--line); margin: 10px 0;"></div>
+        <table><tbody>${itemRows}</tbody></table>
+        <div style="border-top: 1px dashed var(--line); margin: 10px 0;"></div>
+        <div class="receipt-total"><span>Total</span><strong>KES ${moneyRaw(order.total_cents)}</strong></div>
+        ${isQuote ? '' : `
+          <div class="receipt-line"><span>Amount Tendered</span><strong>KES ${moneyRaw(order.total_cents)}</strong></div>
+          <div class="receipt-line"><span>Change</span><strong>KES 0.00</strong></div>
+          <div style="border-top: 1px dashed var(--line); margin: 10px 0;"></div>
+          <div class="receipt-line"><span>Total Excl. VAT</span><strong>KES ${moneyRaw(exclVat)}</strong></div>
+          <div class="receipt-line"><span>Total VAT (${taxRate.toFixed(0)}%)</span><strong>KES ${moneyRaw(vatAmount)}</strong></div>
+          <div style="border-top: 1px dashed var(--line); margin: 10px 0;"></div>
+          <div class="receipt-line"><span>Payment Method</span><strong>${(order.payment_method || 'CASH').toUpperCase()}</strong></div>
+          <div class="receipt-line"><span>Txn Ref</span><strong>${order.payment_ref || `TXN-${order.id * 1234}`}</strong></div>
+        `}
+        <p class="receipt-note" style="line-height: 1.6; margin-top: 12px; white-space: pre-wrap;">
+          ${bfooter}
+        </p>
+        <div class="receipt-actions">
+          <button id="receiptPrintBtn">Print ${isQuote ? 'Quotation' : 'Receipt'}</button>
+          <button id="receiptWhatsAppBtn" type="button">Send via WhatsApp</button>
+        </div>
+      </div>
+    `;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'receiptModal';
+  overlay.className = 'receipt-modal-overlay';
+  overlay.innerHTML = `
+    <div class="receipt-modal" role="dialog" aria-modal="true">
+      <button class="receipt-modal-close" id="receiptModalClose" title="Close">&times;</button>
+      <div class="receipt-modal-print-area">
+        ${bodyHtml}
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  overlay.classList.add('receipt-modal-visible');
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  document.getElementById('receiptModalClose').addEventListener('click', close);
+  document.getElementById('receiptPrintBtn').addEventListener('click', () => window.print());
+  document.getElementById('receiptWhatsAppBtn')?.addEventListener('click', () => showWhatsAppReceiptDialog(order));
+
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+}
+
+// ── UI Utilities ─────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span>${icons[type]||'•'}</span><span>${msg}</span>`;
+  const container = document.getElementById('toastContainer');
+  if (container) {
+    container.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  } else {
+    alert(msg);
+  }
+}
+
+// ── SPA Pages ────────────────────────────────────────────────────────────────
+const SPA_PAGES = {
+  '/pos':       { title: 'POS',       active: 'POS',       shell: 'pos-shell',  page: 'pos' },
+  '/suppliers': { title: 'Suppliers', active: 'Suppliers', shell: 'page-shell', page: 'suppliers' },
+  '/sales':     { title: 'Sales',     active: 'Sales',     shell: 'page-shell', page: 'sales' },
+  '/products':  { title: 'Products',  active: 'Products',  shell: 'page-shell', page: 'products' },
+  '/customers': { title: 'Customers', active: 'Customers', shell: 'page-shell', page: 'customers' },
+  '/reports':   { title: 'Reports',   active: 'Reports',   shell: 'page-shell', page: 'reports' },
+  '/settings':  { title: 'Settings',  active: 'Settings',  shell: 'page-shell', page: 'settings' },
+};
+
+// ── State & Capabilities ──────────────────────────────────────────────────────
+const state = {
+  user: null,
+  settings: {},
+  profile: {},
+  profiles: {},
+  capabilities: {},
+  tables: [],
+  alerts: { expiry: 0, low_stock: 0 },
+  employees: [],
+  selectedEmployeeId: null,
+  selectedTableId: null,
+  pricingTier: 'retail', // 'retail' or 'wholesale'
+  categories: [],
+  items: [],
+  activeCategory: null,
+  order: null,
+  searchQuery: '',
+};
+
+function hasCap(capName) {
+  return Boolean(state.capabilities && state.capabilities[capName]);
+}
+
+function updateHeaderAndNav() {
+  const bLogo = qs('.brand-logo');
+  if (bLogo && state.profile && state.profile.icon) bLogo.textContent = state.profile.icon;
+  const bName = qs('#brandName') || qs('.brand-text span');
+  if (bName && state.settings && state.settings.business_name) bName.textContent = state.settings.business_name;
+  const bTag = qs('#brandTagline') || qs('.brand-text small');
+  if (bTag && state.settings && state.settings.business_tagline) bTag.textContent = state.settings.business_tagline;
+
+  // Add/update Quick Profile Switcher in header
+  const brandEl = qs('.brand');
+  let quickWrap = qs('#quickProfileWrap');
+  if (brandEl && !quickWrap) {
+    quickWrap = document.createElement('div');
+    quickWrap.id = 'quickProfileWrap';
+    quickWrap.className = 'quick-profile-wrap';
+    quickWrap.style.cssText = 'display:flex; align-items:center; margin-left:14px;';
+    brandEl.parentNode.insertBefore(quickWrap, brandEl.nextSibling);
+  }
+  if (quickWrap && state.profiles && Object.keys(state.profiles).length > 0) {
+    const curType = state.settings?.business_type || 'bar';
+    quickWrap.innerHTML = `
+      <div style="display:flex; align-items:center; gap:6px; background:var(--bg); padding:4px 10px; border-radius:20px; border:1px solid var(--line);">
+        <span style="font-size:13px;">🏢</span>
+        <select id="quickProfileSelect" style="background:transparent; border:none; color:var(--ink); font-size:12px; font-weight:700; cursor:pointer; outline:none;" title="Quick switch business profile">
+          ${Object.entries(state.profiles).map(([k, p]) => `
+            <option value="${k}" ${k === curType ? 'selected' : ''} style="background:var(--panel); color:var(--ink);">
+              ${p.icon} ${p.name}
+            </option>
+          `).join('')}
+        </select>
+      </div>
+    `;
+
+    qs('#quickProfileSelect')?.addEventListener('change', async (e) => {
+      const newType = e.target.value;
+      const prof = state.profiles[newType];
+      try {
+        await api('/api/settings', {
+          method: 'POST',
+          body: {
+            business_type: newType,
+            business_name: prof?.name || newType,
+            business_tagline: prof?.tagline || ''
+          }
+        });
+        toast(`Switched to ${prof?.name || newType}!`, 'success');
+        await bootstrap();
+        updateHeaderAndNav();
+        const p = pageName();
+        if (p === 'pos') posLayout();
+        else if (p === 'products') renderProductAdmin();
+        else if (p === 'settings') await renderSettings();
+        else if (p === 'stock') await renderStock();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+  }
+
+  // Setup theme toggle button in header
+  const themeToggle = qs('#themeToggleBtn');
+  if (themeToggle) {
+    const currentTheme = document.documentElement.getAttribute('data-theme') || localStorage.getItem('pos_theme') || 'light';
+    themeToggle.textContent = currentTheme === 'dark' ? '☀️' : '🌙';
+    themeToggle.title = currentTheme === 'dark' ? 'Switch to Light Theme' : 'Switch to Dark Theme';
+    themeToggle.onclick = () => {
+      const active = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+      const next = active === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('pos_theme', next);
+      themeToggle.textContent = next === 'dark' ? '☀️' : '🌙';
+      themeToggle.title = next === 'dark' ? 'Switch to Light Theme' : 'Switch to Dark Theme';
+      // Re-render settings if settings page is currently active
+      if (qs('#themeCardLight') || qs('#themeCardDark')) {
+        renderSettings();
+      }
+    };
+  }
+
+  const navRoot = qs('#topNav') || qs('header nav');
+  if (navRoot) {
+    const navItems = [
+      { icon: '🖥️', label: 'POS', href: '/pos' },
+    ];
+    if (hasCap('suppliers')) {
+      navItems.push({ icon: '🚚', label: 'Suppliers', href: '/suppliers' });
+    }
+    navItems.push({ icon: '🧾', label: 'Sales', href: '/sales' });
+    const productLabel = state.profile?.item_label || 'Products';
+    navItems.push({ icon: '📦', label: productLabel, href: '/products' });
+    navItems.push({ icon: '📊', label: 'Reports', href: '/reports' });
+    navItems.push({ icon: '⚙️', label: 'Settings', href: '/settings' });
+
+    const activeLabel = pageName() ? (SPA_PAGES['/' + pageName()]?.active || 'POS') : 'POS';
+    navRoot.innerHTML = navItems.map(item =>
+      `<a class="nav-link ${activeLabel === item.label ? 'active' : ''}" href="${item.href}"><span class="nav-icon">${item.icon}</span>${item.label}</a>`
+    ).join('');
+  }
+}
+
+async function api(path, options = {}) {
+  const init = { headers: { 'Content-Type': 'application/json' }, ...options };
+  if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+  const res = await fetch(path, init);
+  if (res.status === 401) location.href = '/login';
+  if (res.status === 403) location.href = '/login';
+  if (!res.ok) {
+    let errText = `Request failed: ${res.status}`;
+    try {
+      const errBody = await res.json();
+      if (errBody && errBody.error) errText = errBody.error;
+    } catch(e) {}
+    throw new Error(errText);
+  }
+  return res.json();
+}
+
+async function bootstrap() {
+  const data = await api('/api/bootstrap');
+  state.user = data.user;
+  state.settings = data.settings || {};
+  state.profile = data.profile || {};
+  state.profiles = data.profiles || {};
+  state.capabilities = data.capabilities || {};
+  state.tables = data.tables || [];
+  state.alerts = data.alerts || { expiry: 0, low_stock: 0 };
+  state.employees = data.employees || [];
+  state.selectedEmployeeId = Number(localStorage.getItem('pos_employee_id')) || state.employees[0]?.id || null;
+  state.categories = data.menu ? data.menu.categories : [];
+  state.items = data.menu ? data.menu.items : [];
+  state.activeCategory = 'all';
+
+  updateHeaderAndNav();
+}
+
+function pageName() {
+  return qs('[data-page]')?.dataset.page;
+}
+
+function renderShellError(err) {
+  const root = qs('[data-page]');
+  if (root) root.innerHTML = `<section class="empty">Could not load page. ${err.message}</section>`;
+}
+
+// ── Audio Feedback Synthesizer ───────────────────────────────────────────────
+function playBeep(type = 'success') {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    
+    if (type === 'success') {
+      // Crisp two-tone register chime
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1174.66, ctx.currentTime + 0.05);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.16);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.16);
+    } else {
+      // Low buzz for error or not found
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, ctx.currentTime);
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.22);
+    }
+  } catch (e) {
+    // AudioContext may be restricted until user gesture
+  }
+}
+
+// ── Unified Barcode Scanner Modal ────────────────────────────────────────────
+function showBarcodeModal(mode = 'pos', onScan = null) {
+  const isPos = (mode === 'pos');
+  const title = isPos ? 'Scan Barcode to Add to Cart' : 'Scan Barcode for Product';
+  const subtitle = isPos 
+    ? 'Scan physical barcode with camera or handheld USB reader to immediately add to order'
+    : 'Scan a barcode to populate product details or lookup existing items';
+
+  // Sample barcoded items from current catalog for quick 1-click test
+  const sampleItems = (state.items || []).filter(i => i.barcode).slice(0, 5);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:480px; max-width:92vw; max-height:92vh; overflow-y:auto;">
+      <div class="modal-head" style="padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:24px;">📷</span>
+          <div>
+            <h3 style="margin:0; font-size:16px; font-weight:800; color:var(--ink);">${title}</h3>
+            <span style="font-size:12px; color:var(--muted);">${subtitle}</span>
+          </div>
+        </div>
+        <button class="modal-close" id="bmClose" type="button">&times;</button>
+      </div>
+
+      <div style="padding:18px 20px;">
+        <!-- Camera Viewfinder -->
+        <div class="scanner-viewfinder" id="scannerViewfinder">
+          <video class="scanner-video" id="scannerVideo" playsinline muted autoplay></video>
+          <div class="scanner-reticle"></div>
+          <div class="scanner-laser"></div>
+          <div id="cameraStatusText" style="position:absolute; bottom:10px; left:0; right:0; text-align:center; font-size:11px; color:#a1a1aa; z-index:6; background:rgba(0,0,0,0.6); padding:3px 8px;">
+            Initializing camera…
+          </div>
+        </div>
+
+        <!-- Manual or USB Scanner Input -->
+        <div style="margin-bottom:12px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+            <label style="font-size:12px; font-weight:700; color:var(--ink); text-transform:uppercase; letter-spacing:0.5px;">Barcode / SKU Input</label>
+            <span style="font-size:11px; color:var(--muted);">USB scanner ready</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="barcodeManualInput" class="field" placeholder="Enter / scan barcode here…" autocomplete="off" autofocus style="flex:1; font-size:15px; font-family:monospace; font-weight:700; text-align:center; letter-spacing:1px;">
+            <button type="button" class="primary" id="barcodeSubmitBtn" style="padding:8px 16px; font-size:13px; font-weight:700; white-space:nowrap;">
+              ${isPos ? '+ Add to Cart' : 'Lookup / Add'}
+            </button>
+          </div>
+        </div>
+
+        <!-- Scan Feedback Notification Box -->
+        <div id="scannerFeedback" style="min-height:48px; border-radius:8px; border:1px solid var(--line); background:var(--bg); padding:10px 14px; margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; transition:all 0.2s;">
+          <div style="font-size:12.5px; color:var(--muted); line-height:1.4;" id="feedbackMsg">
+            Ready to scan. Point camera or press Enter after scanning barcode.
+          </div>
+        </div>
+
+        ${sampleItems.length ? `
+          <!-- Quick-test Sample Barcodes from Catalog -->
+          <div style="border-top:1px dashed var(--line); padding-top:12px; margin-bottom:14px;">
+            <div style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">
+              ⚡ Quick Test Barcodes (Click to simulate scan):
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              ${sampleItems.map(item => `
+                <button type="button" class="quick-barcode-pill" data-code="${item.barcode}" title="${item.name} (${money(item.price_cents)})">
+                  <strong>${item.barcode}</strong>
+                  <span>${item.name}</span>
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <!-- Footer actions -->
+        <div style="display:flex; align-items:center; justify-content:space-between; border-top:1px solid var(--line); padding-top:14px;">
+          <div style="font-size:12px; font-weight:600; color:var(--muted);">
+            ${isPos ? `Cart items: <strong id="scannerCartCount">${state.order?.items?.length || 0}</strong>` : ''}
+          </div>
+          <button type="button" class="primary" id="bmDoneBtn" style="padding:9px 20px; font-size:13px;">
+            ${isPos ? '✓ Done / Return to Cart' : 'Close'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  const videoElem = overlay.querySelector('#scannerVideo');
+  const cameraStatus = overlay.querySelector('#cameraStatusText');
+  const manualInput = overlay.querySelector('#barcodeManualInput');
+  const submitBtn = overlay.querySelector('#barcodeSubmitBtn');
+  const feedbackMsg = overlay.querySelector('#feedbackMsg');
+  const feedbackBox = overlay.querySelector('#scannerFeedback');
+  const cartCountElem = overlay.querySelector('#scannerCartCount');
+
+  manualInput.focus();
+
+  let stream = null;
+  let detector = null;
+  let scanActive = true;
+  let lastScannedCode = '';
+  let lastScannedTime = 0;
+
+  // Cleanup handler
+  const closeModal = () => {
+    scanActive = false;
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+    overlay.remove();
+  };
+
+  overlay.querySelector('#bmClose').addEventListener('click', closeModal);
+  overlay.querySelector('#bmDoneBtn').addEventListener('click', closeModal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+
+  // Start Camera Stream & Detection
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+    }).then(s => {
+      stream = s;
+      if (videoElem) {
+        videoElem.srcObject = stream;
+        videoElem.play().catch(() => {});
+        cameraStatus.textContent = 'Camera active — hold barcode in box';
+      }
+
+      if ('BarcodeDetector' in window) {
+        try {
+          detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'] });
+          const detectLoop = async () => {
+            if (!scanActive) return;
+            if (videoElem.readyState >= 2) {
+              try {
+                const barcodes = await detector.detect(videoElem);
+                if (barcodes && barcodes.length > 0) {
+                  const rawCode = barcodes[0].rawValue;
+                  const now = Date.now();
+                  // Debounce: prevent same code scanning repeatedly in 1.5s
+                  if (rawCode !== lastScannedCode || (now - lastScannedTime) > 1500) {
+                    lastScannedCode = rawCode;
+                    lastScannedTime = now;
+                    handleCodeScanned(rawCode);
+                  }
+                }
+              } catch (e) {}
+            }
+            if (scanActive) requestAnimationFrame(detectLoop);
+          };
+          requestAnimationFrame(detectLoop);
+        } catch (e) {
+          cameraStatus.textContent = 'Hold barcode in box or scan with USB gun';
+        }
+      } else {
+        cameraStatus.textContent = 'Video on. Use handheld scanner or type barcode below';
+      }
+    }).catch(err => {
+      if (cameraStatus) cameraStatus.textContent = 'Camera unavailable — use handheld reader or input below';
+    });
+  } else {
+    if (cameraStatus) cameraStatus.textContent = 'Use handheld reader or type barcode below';
+  }
+
+  // Core Barcode Processor
+  const handleCodeScanned = async (code) => {
+    const q = (code || '').trim().toLowerCase();
+    if (!q) return;
+
+    manualInput.value = code;
+
+    // Custom onScan callback (used e.g. in Add Product modal barcode input)
+    if (typeof onScan === 'function') {
+      playBeep('success');
+      onScan(code);
+      closeModal();
+      return;
+    }
+
+    // Match against state.items
+    const match = (state.items || []).find(i =>
+      (i.barcode && i.barcode.trim().toLowerCase() === q) ||
+      (i.sku && i.sku.trim().toLowerCase() === q)
+    );
+
+    if (isPos) {
+      if (match) {
+        // In system: Add to cart
+        if (hasCap('variants') && match.variants_json) {
+          closeModal();
+          showVariantModal(match);
+          return;
+        }
+
+        const existing = state.order?.items?.find(i => i.menu_item_id === match.id);
+        const existingQty = existing ? existing.qty : 0;
+        if (match.stock_qty !== undefined && (1 + existingQty) > match.stock_qty) {
+          playBeep('error');
+          feedbackBox.style.background = 'rgba(239, 68, 68, 0.15)';
+          feedbackBox.style.borderColor = 'var(--danger)';
+          feedbackMsg.innerHTML = `<span style="color:var(--danger); font-weight:700;">⚠️ Cannot add "${match.name}". Stock limit reached (${match.stock_qty} in stock).</span>`;
+          return;
+        }
+
+        await addItemWithQty(match.id, 1);
+        playBeep('success');
+
+        feedbackBox.style.background = 'rgba(22, 163, 74, 0.15)';
+        feedbackBox.style.borderColor = 'var(--ok)';
+        feedbackMsg.innerHTML = `
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">✅</span>
+            <div>
+              <strong style="color:var(--ok); font-size:13px;">Added to cart: ${match.name}</strong>
+              <div style="font-size:11px; color:var(--ink);">${money(match.price_cents)} • Barcode: ${match.barcode || match.sku}</div>
+            </div>
+          </div>
+        `;
+
+        if (cartCountElem) {
+          cartCountElem.textContent = state.order?.items?.length || 0;
+        }
+
+        manualInput.value = '';
+        manualInput.focus();
+      } else {
+        // Not in system
+        playBeep('error');
+        feedbackBox.style.background = 'rgba(245, 158, 11, 0.15)';
+        feedbackBox.style.borderColor = 'var(--warn)';
+        feedbackMsg.innerHTML = `
+          <div>
+            <div style="color:var(--warn); font-weight:700; font-size:13px;">⚠️ Barcode "${code}" not found in system!</div>
+            <div style="font-size:11px; color:var(--muted); margin-top:2px;">Item is not registered in this shop catalog.</div>
+          </div>
+          <button type="button" class="btn-xs" id="registerMissingProductBtn" style="white-space:nowrap; background:var(--ink); color:var(--panel);">+ Register Product</button>
+        `;
+
+        feedbackBox.querySelector('#registerMissingProductBtn')?.addEventListener('click', () => {
+          closeModal();
+          location.href = '/products';
+          setTimeout(() => {
+            showProductModal({ barcode: code, sku: 'SKU-' + code.slice(-6) });
+          }, 300);
+        });
+      }
+    } else {
+      // Product Page Mode
+      if (match) {
+        playBeep('success');
+        feedbackBox.style.background = 'rgba(37, 99, 235, 0.15)';
+        feedbackBox.style.borderColor = 'var(--info)';
+        feedbackMsg.innerHTML = `
+          <div>
+            <div style="color:var(--info); font-weight:700; font-size:13px;">✓ Product Already Registered</div>
+            <div style="font-size:11px; color:var(--ink); margin-top:2px;"><strong>${match.name}</strong> • SKU: ${match.sku} • ${money(match.price_cents)}</div>
+          </div>
+          <button type="button" class="btn-xs" id="editFoundProductBtn" style="white-space:nowrap; background:var(--primary); color:var(--primary-fg);">✏️ Edit Product</button>
+        `;
+        feedbackBox.querySelector('#editFoundProductBtn')?.addEventListener('click', () => {
+          closeModal();
+          showProductModal(match);
+        });
+      } else {
+        // New Barcode detected -> open Add Product modal with barcode pre-filled
+        playBeep('success');
+        toast(`New barcode "${code}" detected. Opening product form…`, 'info');
+        closeModal();
+        showProductModal({ barcode: code, sku: 'SKU-' + (code.length > 6 ? code.slice(-6) : code) });
+      }
+    }
+  };
+
+  // Submit on manual input or USB scanner enter
+  submitBtn.addEventListener('click', () => {
+    handleCodeScanned(manualInput.value.trim());
+  });
+
+  manualInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleCodeScanned(manualInput.value.trim());
+    }
+  });
+
+  // Sample barcode pills click
+  overlay.querySelectorAll('.quick-barcode-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handleCodeScanned(btn.dataset.code);
+    });
+  });
+}
+
+// ── POS Layout ────────────────────────────────────────────────────────────────
+function posLayout() {
+  const root = qs('[data-page="pos"]');
+  const itemLabel = state.profile?.item_label || 'Products';
+  const orderTypes = (state.profile?.order_types && state.profile.order_types.length)
+    ? state.profile.order_types
+    : ['walk-in', 'quote', 'layaway'];
+
+  root.innerHTML = `
+    <section class="menu-side">
+      <div class="pos-head" style="flex-wrap:wrap; gap:8px;">
+        <h2>${itemLabel}</h2>
+        
+        <div style="display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap;">
+          ${hasCap('wholesale_pricing') ? `
+            <button type="button" id="tierToggleBtn" class="tier-toggle-btn ${state.pricingTier === 'wholesale' ? 'active' : ''}">
+              ${state.pricingTier === 'wholesale' ? '⚡ Wholesale Pricing' : '🏷️ Retail Pricing'}
+            </button>
+          ` : ''}
+
+          ${hasCap('tables') ? `
+            <select id="tableSelect" class="field" style="padding:6px 10px; font-size:13px; max-width:140px;">
+              <option value="">-- Table / Tab --</option>
+              ${state.tables.map(t => `<option value="${t.id}" ${state.selectedTableId == t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
+            </select>
+          ` : ''}
+
+          ${hasCap('waiters') ? `
+            <select id="waiterSelect" class="field" style="padding:6px 10px; font-size:13px; max-width:140px;">
+              <option value="">-- Staff / Waiter --</option>
+              ${state.employees.map(e => `<option value="${e.id}" ${state.selectedEmployeeId == e.id ? 'selected' : ''}>${e.name}</option>`).join('')}
+            </select>
+          ` : ''}
+
+          <select id="orderType" class="field" style="padding:6px 10px; font-size:13px;">
+            ${orderTypes.map(t => {
+              const label = t.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              return `<option value="${t}">${label}</option>`;
+            }).join('')}
+          </select>
+        </div>
+      </div>
+
+      ${hasCap('expiry_alerts') && state.alerts.expiry > 0 ? `
+        <div class="alert-banner warning" style="margin: 8px 16px; padding: 8px 14px; background: #fef2f2; border: 1px solid #f87171; border-radius: 8px; font-size: 13px; color: #991b1b; display: flex; align-items: center; justify-content: space-between;">
+          <span>⚠️ <strong>Expiry Alert:</strong> ${state.alerts.expiry} item(s) expired or expiring within 30 days.</span>
+          <a href="/products" class="nav-link" style="color:#b91c1c; font-weight:700; text-decoration:underline;">View Products</a>
+        </div>
+      ` : ''}
+
+      ${hasCap('reorder_levels') && state.alerts.low_stock > 0 ? `
+        <div class="alert-banner info" style="margin: 8px 16px; padding: 8px 14px; background: #fffbeb; border: 1px solid #fbbf24; border-radius: 8px; font-size: 13px; color: #92400e; display: flex; align-items: center; justify-content: space-between;">
+          <span>📦 <strong>Reorder Alert:</strong> ${state.alerts.low_stock} product(s) at or below reorder level.</span>
+          <a href="/stock" class="nav-link" style="color:#b45309; font-weight:700; text-decoration:underline;">Check Stock</a>
+        </div>
+      ` : ''}
+
+      <div class="sku-search-wrap" style="display:flex; gap:8px; align-items:center;">
+        <div class="sku-search-inner" style="flex:1;">
+          <span class="sku-search-icon">&#128269;</span>
+          <input class="sku-search-input" id="skuSearch" placeholder="${hasCap('barcode') ? 'Search name, SKU or scan barcode…' : 'Search by name or SKU…'}" autocomplete="off" autocorrect="off">
+          <button class="sku-search-clear" id="skuClear" title="Clear">&#215;</button>
+        </div>
+        <button type="button" class="barcode-scan-btn" id="posBarcodeScanBtn" title="Scan Barcode to Add to Cart">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14"/>
+          </svg>
+          <span>Scan Barcode</span>
+        </button>
+      </div>
+      <div class="tabs" id="catTabs"></div>
+      <div class="item-grid" id="itemGrid"></div>
+    </section>
+    <aside class="ticket-side">
+      <div class="ticket-head">
+        <div>
+          <h2>${hasCap('tables') ? 'Ticket / Tab' : 'Sale'}</h2>
+          <small>${state.profile?.name || 'POS'}</small>
+        </div>
+        <div style="font-weight: 700; font-size: 15px; color: var(--ink);">
+          ${selectedEmployeeName() || state.user?.username || 'Staff'}
+        </div>
+      </div>
+      <div class="ticket-list" id="ticketList"></div>
+      <div class="ticket-foot" id="ticketFoot"></div>
+    </aside>
+  `;
+
+  qs('#orderType')?.addEventListener('change', ensureOrder);
+  
+  qs('#tableSelect')?.addEventListener('change', e => {
+    state.selectedTableId = e.target.value ? Number(e.target.value) : null;
+    if (state.order) {
+      state.order.table_id = state.selectedTableId;
+      const found = state.tables.find(t => t.id === state.selectedTableId);
+      state.order.table_name = found ? found.name : '';
+      renderTicket();
+    }
+  });
+
+  qs('#waiterSelect')?.addEventListener('change', e => {
+    state.selectedEmployeeId = e.target.value ? Number(e.target.value) : null;
+    if (state.order) {
+      state.order.employee_id = state.selectedEmployeeId;
+      state.order.employee_name = selectedEmployeeName();
+      renderTicket();
+    }
+  });
+
+  qs('#tierToggleBtn')?.addEventListener('click', () => {
+    state.pricingTier = state.pricingTier === 'wholesale' ? 'retail' : 'wholesale';
+    qs('#tierToggleBtn').classList.toggle('active', state.pricingTier === 'wholesale');
+    qs('#tierToggleBtn').textContent = state.pricingTier === 'wholesale' ? '⚡ Wholesale Pricing' : '🏷️ Retail Pricing';
+    toast(`Switched to ${state.pricingTier.toUpperCase()} pricing`, 'info');
+    renderItems();
+    if (state.order) {
+      state.order.pricing_tier = state.pricingTier;
+      renderTicket();
+    }
+  });
+
+  qs('#posBarcodeScanBtn')?.addEventListener('click', () => {
+    showBarcodeModal('pos');
+  });
+
+  const skuInput = qs('#skuSearch');
+  skuInput.addEventListener('input', () => {
+    state.searchQuery = skuInput.value.trim().toLowerCase();
+    renderItems();
+  });
+  qs('#skuClear').addEventListener('click', () => {
+    skuInput.value = '';
+    state.searchQuery = '';
+    renderItems();
+    skuInput.focus();
+  });
+
+  skuInput.addEventListener('keydown', async e => {
+    if (e.key === 'Enter') {
+      const q = skuInput.value.trim().toLowerCase();
+      if (!q) return;
+      const match = (state.items || []).find(i =>
+        (i.barcode && i.barcode.trim().toLowerCase() === q) ||
+        (i.sku && i.sku.trim().toLowerCase() === q)
+      );
+      if (match) {
+        if (hasCap('variants') && match.variants_json) {
+          showVariantModal(match);
+        } else {
+          const existing = state.order?.items?.find(i => i.menu_item_id === match.id);
+          const existingQty = existing ? existing.qty : 0;
+          if (match.stock_qty !== undefined && (1 + existingQty) > match.stock_qty) {
+            playBeep('error');
+            toast(`Cannot add "${match.name}". Only ${match.stock_qty} left in stock.`, 'error');
+            return;
+          }
+          await addItemWithQty(match.id, 1);
+          playBeep('success');
+          toast(`✓ Added "${match.name}" to cart!`, 'success');
+        }
+        skuInput.value = '';
+        state.searchQuery = '';
+        renderItems();
+      } else {
+        playBeep('error');
+        toast(`⚠️ Barcode / SKU "${skuInput.value.trim()}" not found in system!`, 'error');
+      }
+    }
+  });
+
+  renderTabs();
+  renderItems();
+  renderTicket();
+}
+
+function getCategoryIcon(name) {
+  const zap = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>`;
+  const droplet = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"></path></svg>`;
+  const palette = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c2 0 3-1 3-2 0-.55-.22-1.05-.59-1.41-.36-.36-.59-.86-.59-1.41 0-1.1.9-2 2-2h1c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8zm-4 8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm4-4c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm4 4c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>`;
+  const crosshair = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`;
+  const wrench = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>`;
+  const shield = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>`;
+  const box = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`;
+  
+  const lower = name.toLowerCase();
+  if (lower.includes('electric')) return zap;
+  if (lower.includes('plumb')) return droplet;
+  if (lower.includes('paint')) return palette;
+  if (lower.includes('fastener')) return crosshair;
+  if (lower.includes('tool')) return wrench;
+  if (lower.includes('safet')) return shield;
+  if (lower.includes('building') || lower.includes('material')) return box;
+  if (lower === 'all') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>`;
+  
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;margin-right:6px;vertical-align:-3px"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>`;
+}
+
+function renderTabs() {
+  const tabs = qs('#catTabs');
+  if (!tabs) return;
+  
+  const allTab = `<button class="tab ${state.activeCategory === 'all' ? 'active' : ''}" data-cat="all">
+    ${getCategoryIcon('All')} All
+  </button>`;
+  
+  const catTabs = state.categories.map(cat =>
+    `<button class="tab ${cat.id === state.activeCategory ? 'active' : ''}" data-cat="${cat.id}">
+       ${getCategoryIcon(cat.name)} ${cat.name}
+     </button>`
+  ).join('');
+  
+  tabs.innerHTML = allTab + catTabs;
+  
+  qsa('.tab').forEach(btn => btn.addEventListener('click', () => {
+    state.activeCategory = btn.dataset.cat === 'all' ? 'all' : Number(btn.dataset.cat);
+    state.searchQuery = '';
+    const inp = qs('#skuSearch');
+    if (inp) inp.value = '';
+    renderTabs();
+    renderItems();
+  }));
+}
+
+function renderItems() {
+  const grid = qs('#itemGrid');
+  if (!grid) return;
+  let items = state.items;
+  if (state.searchQuery) {
+    const q = state.searchQuery;
+    items = items.filter(i =>
+      i.name.toLowerCase().includes(q) ||
+      (i.sku && i.sku.toLowerCase().includes(q)) ||
+      (i.barcode && i.barcode.toLowerCase().includes(q))
+    );
+  } else {
+    if (state.activeCategory !== 'all') {
+      items = items.filter(i => i.category_id === state.activeCategory);
+    }
+  }
+
+  grid.innerHTML = items.map(item => {
+    const low = item.stock_qty !== undefined && (item.reorder_level ? item.stock_qty <= item.reorder_level : item.stock_qty <= 5);
+    const stockLabel = item.stock_qty !== undefined
+      ? `<span class="stock-badge ${low ? '' : 'ok'}">${item.stock_qty} ${item.unit || 'pcs'}</span>`
+      : '';
+    const catName = state.categories.find(c => c.id === item.category_id)?.name || '';
+    const effectivePrice = (state.pricingTier === 'wholesale' && item.wholesale_price_cents) ? item.wholesale_price_cents : item.price_cents;
+    return `
+      <button class="menu-btn" data-id="${item.id}">
+        <div class="menu-btn-img-wrapper">
+          ${item.image_url ? `<img src="${item.image_url}" style="width:100%;height:100%;object-fit:contain;padding:12px;box-sizing:border-box;">` : getCategoryIcon(catName)}
+          ${stockLabel}
+        </div>
+        <div class="menu-btn-content">
+          <strong>${item.name}</strong>
+          ${item.strength ? `<div style="font-size:11px; color:#2563eb; font-weight:700;">${item.strength}</div>` : ''}
+          ${item.sku ? `<div class="item-sku">SKU: ${item.sku}</div>` : ''}
+          <div class="item-price">
+            ${money(effectivePrice)}
+            ${state.pricingTier === 'wholesale' && item.wholesale_price_cents ? '<span style="font-size:10px; color:#2563eb; font-weight:700; margin-left:4px;">(Wholesale)</span>' : ''}
+          </div>
+          <div class="menu-btn-stock-status ${low ? 'low' : ''}">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            ${low ? 'Low Stock' : 'In Stock'}
+          </div>
+        </div>
+      </button>
+    `;
+  }).join('') || `<div class="empty">No products found</div>`;
+
+  qsa('.menu-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const id = Number(btn.dataset.id);
+    const item = state.items.find(i => i.id === id);
+    if (!item) return;
+
+    if (hasCap('variants') && item.variants_json) {
+      showVariantModal(item);
+      return;
+    }
+
+    if (item.decimal_qty_enabled || hasCap('decimal_qty') || hasCap('order_notes')) {
+      showQtyPopup(item);
+      return;
+    }
+
+    const existing = state.order?.items?.find(i => i.menu_item_id === item.id);
+    const existingQty = existing ? existing.qty : 0;
+    if (item.stock_qty !== undefined && (1 + existingQty) > item.stock_qty) {
+      toast(`Cannot add item. Only ${item.stock_qty} left in stock (you have ${existingQty} in cart).`, 'error');
+      return;
+    }
+    await addItemWithQty(item.id, 1);
+  }));
+}
+
+// ── Variant Selection Modal ───────────────────────────────────────────────────
+function showVariantModal(item) {
+  let variants = [];
+  try {
+    if (typeof item.variants_json === 'string') {
+      variants = JSON.parse(item.variants_json);
+    } else if (Array.isArray(item.variants_json)) {
+      variants = item.variants_json;
+    }
+  } catch(e) {
+    if (item.variants_json) {
+      variants = item.variants_json.split(',').map(s => ({ name: s.trim() }));
+    }
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width: 460px; text-align: left;">
+      <h3 style="margin-top:0">${item.name}</h3>
+      <p style="color:var(--muted); font-size:13px; margin-bottom: 16px;">Select variant or shade to add to order:</p>
+      
+      <div class="variant-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap:10px; margin-bottom: 16px;">
+        ${variants.map((v, idx) => {
+          const vName = typeof v === 'object' ? v.name : v;
+          const vPrice = typeof v === 'object' && v.price_cents ? money(v.price_cents) : '';
+          const vStock = typeof v === 'object' && v.stock_qty !== undefined ? `${v.stock_qty} left` : '';
+          return `
+            <button type="button" class="variant-btn" data-idx="${idx}" style="padding:10px; border:2px solid var(--line); border-radius:8px; background:white; text-align:left; cursor:pointer; transition:all 0.15s;">
+              <strong style="display:block; color:var(--ink); font-size:13px;">${vName}</strong>
+              ${vPrice ? `<div style="color:var(--primary-dark); font-weight:700; font-size:12px; margin-top:2px;">${vPrice}</div>` : ''}
+              ${vStock ? `<div style="color:var(--muted); font-size:11px;">${vStock}</div>` : ''}
+            </button>
+          `;
+        }).join('')}
+      </div>
+
+      <div style="border-top:1px dashed var(--line); padding-top:12px; margin-bottom:16px;">
+        <label style="font-size:12px; font-weight:600; color:var(--muted); display:block; margin-bottom:4px;">Or custom specification:</label>
+        <input class="field" id="customVariantInput" placeholder="e.g. Size XL / Red / Shade 3" style="width:100%; padding:8px;">
+      </div>
+
+      <div class="qty-popup-actions">
+        <button class="ghost" id="varCancel">Cancel</button>
+        <button class="primary" id="varCustomConfirm">Add Specification</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('#varCancel').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  overlay.querySelectorAll('.variant-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.idx);
+      const selected = variants[idx];
+      const vName = typeof selected === 'object' ? selected.name : selected;
+      const vPrice = typeof selected === 'object' && selected.price_cents ? selected.price_cents : null;
+      close();
+      showQtyPopup(item, vName, vPrice);
+    });
+  });
+
+  overlay.querySelector('#varCustomConfirm').addEventListener('click', () => {
+    const val = overlay.querySelector('#customVariantInput').value.trim();
+    if (!val) {
+      toast('Please enter or select a variant', 'error');
+      return;
+    }
+    close();
+    showQtyPopup(item, val);
+  });
+}
+
+// ── Qty Popup ─────────────────────────────────────────────────────────────────
+function showQtyPopup(item, variantInfo = null, customPrice = null) {
+  const isDecimal = Boolean(item.decimal_qty_enabled || hasCap('decimal_qty'));
+  const step = isDecimal ? '0.01' : '1';
+  const min = isDecimal ? '0.01' : '1';
+  const unitPrice = customPrice !== null ? customPrice : (state.pricingTier === 'wholesale' && item.wholesale_price_cents ? item.wholesale_price_cents : item.price_cents);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width:420px; text-align:left;">
+      <h3 style="margin-top:0;">${item.name}</h3>
+      ${variantInfo ? `<div style="background:#f1f5f9; padding:4px 8px; border-radius:6px; display:inline-block; font-size:12px; font-weight:700; color:var(--primary-dark); margin-bottom:8px;">Variant: ${variantInfo}</div>` : ''}
+      <p style="margin:4px 0 12px; color:var(--muted); font-size:14px;">
+        ${money(unitPrice)} per ${item.unit || 'pcs'} ${item.sku ? `· SKU: ${item.sku}` : ''}
+        ${item.batch_no ? `<br><small>Batch: ${item.batch_no} ${item.expiry_date ? `(Exp: ${item.expiry_date})` : ''}</small>` : ''}
+      </p>
+
+      <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Quantity (${item.unit || 'pcs'})</label>
+      <div class="qty-popup-row" style="margin-bottom:12px;">
+        <button class="qty-pop-btn" id="qtyDec">−</button>
+        <input type="number" id="qtyVal" value="1" min="${min}" step="${step}" max="9999" inputmode="decimal">
+        <button class="qty-pop-btn" id="qtyInc">+</button>
+      </div>
+
+      ${hasCap('order_notes') ? `
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-size:13px; font-weight:600; margin-bottom:4px;">Item Note / Instructions</label>
+          <input type="text" class="field" id="itemNoteInput" placeholder="e.g. Well done, no ice, 2.5m cut, dosage note..." style="width:100%; padding:8px;" autocomplete="off">
+        </div>
+      ` : ''}
+
+      <div class="qty-popup-actions">
+        <button class="ghost" id="qtyCancel">Cancel</button>
+        <button class="primary" id="qtyConfirm">Add to Sale</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const inp = overlay.querySelector('#qtyVal');
+  inp.select();
+  inp.focus();
+
+  overlay.querySelector('#qtyDec').addEventListener('click', () => {
+    const current = parseFloat(inp.value) || 1;
+    const next = Math.max(isDecimal ? 0.1 : 1, current - 1);
+    inp.value = isDecimal ? (Math.round(next * 100) / 100) : next;
+  });
+  overlay.querySelector('#qtyInc').addEventListener('click', () => {
+    const current = parseFloat(inp.value) || 0;
+    const next = current + 1;
+    inp.value = isDecimal ? (Math.round(next * 100) / 100) : next;
+  });
+  overlay.querySelector('#qtyCancel').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  const confirm = async () => {
+    const qty = parseFloat(inp.value) || 1;
+    if (qty <= 0) {
+      toast('Quantity must be greater than 0', 'error');
+      return;
+    }
+
+    const note = overlay.querySelector('#itemNoteInput')?.value?.trim() || '';
+
+    const existing = state.order?.items?.find(i => i.menu_item_id === item.id && (i.variant_info || '') === (variantInfo || ''));
+    const existingQty = existing ? existing.qty : 0;
+
+    if (item.stock_qty !== undefined && (qty + existingQty) > item.stock_qty) {
+      toast(`Cannot add ${qty}. Only ${item.stock_qty} left in stock (you have ${existingQty} in cart).`, 'error');
+      return;
+    }
+
+    overlay.remove();
+    await addItemWithQty(item.id, qty, variantInfo || '', note, item.batch_no || '');
+  };
+  overlay.querySelector('#qtyConfirm').addEventListener('click', confirm);
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
+}
+
+async function ensureOrder() {
+  if (state.order && state.order.status === 'open') return state.order;
+  const customerInput = qs('#customerName');
+  const orderType = qs('#orderType')?.value || (state.profile?.order_types?.[0] || 'walk-in');
+  const isQuote = orderType.toLowerCase().includes('quote') || orderType === 'quote';
+  state.order = await api('/api/orders', {
+    method: 'POST',
+    body: {
+      order_type: orderType,
+      table_id: state.selectedTableId || null,
+      employee_id: state.selectedEmployeeId,
+      customer_name: customerInput?.value?.trim() || '',
+      pricing_tier: state.pricingTier || 'retail',
+      is_quote: isQuote ? 1 : 0,
+      notes: qs('#orderNotes')?.value?.trim() || '',
+    },
+  });
+  renderTicket();
+  return state.order;
+}
+
+async function addItemWithQty(menuItemId, qty, variantInfo = '', note = '', batchNo = '') {
+  const order = await ensureOrder();
+  state.order = await api('/api/order/add', {
+    method: 'POST',
+    body: {
+      order_id: order.id,
+      menu_item_id: menuItemId,
+      qty,
+      pricing_tier: state.pricingTier || 'retail',
+      variant_info: variantInfo,
+      note: note,
+      batch_no: batchNo,
+    },
+  });
+  renderTicket();
+}
+
+async function changeQty(itemId, qty) {
+  if (state.order && state.order.items) {
+    const existingItem = state.order.items.find(i => i.id === itemId);
+    if (existingItem) {
+      const catalogItem = state.items.find(i => i.id === existingItem.menu_item_id);
+      if (catalogItem && catalogItem.stock_qty !== undefined) {
+        if (qty > catalogItem.stock_qty) {
+          toast(`Cannot increase. Only ${catalogItem.stock_qty} left in stock.`, 'error');
+          return;
+        }
+      }
+    }
+  }
+  
+  state.order = await api('/api/order/qty', { method: 'POST', body: { item_id: itemId, qty } });
+  renderTicket();
+}
+
+async function setStatus(status) {
+  if (!state.order) return;
+  state.order = await api('/api/order/status', {
+    method: 'POST',
+    body: { order_id: state.order.id, status },
+  });
+  renderTicket();
+}
+
+function renderTicket() {
+  const list = qs('#ticketList');
+  const foot = qs('#ticketFoot');
+  if (!list || !foot) return;
+
+  if (!state.order) {
+    list.innerHTML = `<div class="empty">Add products to start a sale</div>`;
+    foot.innerHTML = `
+      <div class="customer-row">
+        <input id="customerName" placeholder="Customer name (optional)" autocomplete="off">
+      </div>
+      <button class="primary" id="newTicket" style="width:100%">New Sale</button>
+      <div class="totals"><div class="grand"><span>Total</span><span>KES 0.00</span></div></div>
+    `;
+    qs('#newTicket').addEventListener('click', ensureOrder);
+    return;
+  }
+
+  const isQuote = Boolean(state.order.is_quote || state.order.order_type === 'quote');
+
+  list.innerHTML = state.order.items.length
+    ? state.order.items.map(item => {
+      const dbItem = state.items.find(i => i.id === item.menu_item_id) || {};
+      const catName = state.categories.find(c => c.id === dbItem.category_id)?.name || '';
+      return `
+      <div class="ticket-row">
+        <div class="ticket-img">
+          ${dbItem.image_url ? `<img src="${dbItem.image_url}" style="width:100%;height:100%;object-fit:contain;padding:4px;box-sizing:border-box;border-radius:7px;">` : getCategoryIcon(catName)}
+        </div>
+        <div class="ticket-info">
+          <strong>${item.name}</strong>
+          ${item.variant_info ? `<div style="font-size:11px; color:var(--ink); font-weight:700;">[${item.variant_info}]</div>` : ''}
+          ${item.batch_no ? `<div style="font-size:11px; color:var(--muted);">Batch: ${item.batch_no}</div>` : ''}
+          ${item.note ? `<div style="font-size:11px; color:#2563eb; font-style:italic;">* ${item.note}</div>` : ''}
+          <small>SKU: ${dbItem.sku || '-'}</small>
+          <div class="t-price">${money(item.unit_price_cents)}</div>
+        </div>
+        <div class="ticket-right">
+          <div class="qty-controls">
+            <button data-qty="${Math.max(0, (item.qty - 1))}" data-id="${item.id}">−</button>
+            <strong>${item.qty}</strong>
+            <button data-qty="${item.qty + 1}" data-id="${item.id}">+</button>
+            <button class="remove-btn" data-qty="0" data-id="${item.id}">×</button>
+          </div>
+          <div class="t-total">${money(item.line_total_cents)}</div>
+        </div>
+      </div>
+      `}).join('')
+    : `<div class="empty">Add products to start a sale</div>`;
+
+  qsa('.qty-controls button').forEach(btn =>
+    btn.addEventListener('click', () => changeQty(Number(btn.dataset.id), Number(btn.dataset.qty)))
+  );
+
+  foot.innerHTML = `
+    ${isQuote ? `<div class="quote-banner" style="background:#eff6ff; border:1px dashed #3b82f6; border-radius:8px; padding:8px; text-align:center; font-size:12px; font-weight:800; color:#1d4ed8; margin-bottom:10px;">📋 ESTIMATE / QUOTATION</div>` : ''}
+    <div class="totals">
+      <div><span>Receipt #</span><span>${state.order.ticket_no}</span></div>
+      ${state.order.table_name ? `<div><span>Table / Tab</span><strong>${state.order.table_name}</strong></div>` : ''}
+      <div><span>Type</span><span>${state.order.order_type}</span></div>
+      ${state.order.pricing_tier === 'wholesale' ? `<div><span>Tier</span><span class="cap-pill" style="background:#e0e7ff; color:#3730a3; font-size:10px;">Wholesale</span></div>` : ''}
+      <div><span>Served By</span><span>${state.order.employee_name || selectedEmployeeName() || '-'}</span></div>
+      <div><span>Subtotal</span><span>${money(state.order.subtotal_cents)}</span></div>
+      <div class="grand"><span>Total</span><span>${money(state.order.total_cents)}</span></div>
+    </div>
+    <div class="actions" style="display:flex; flex-direction:column; gap:8px;">
+      <div style="display:flex; gap:8px;">
+        ${isQuote ? `
+          <button class="primary" id="convertQuoteBtn" style="flex:1;">Convert to Sale</button>
+          <button class="secondary" id="printQuoteBtn" style="flex:1;">Print Quote</button>
+        ` : `
+          <button class="primary" id="checkoutBtn" style="flex:1;">Checkout</button>
+          ${hasCap('kot') ? `<button class="secondary" id="kotBtn" style="flex:1; background:#fef3c7; color:#92400e; border:1px solid #fde68a;">🍳 Send KOT</button>` : ''}
+        `}
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="secondary" id="newTicket" style="flex:1;">New</button>
+        <button class="danger" id="voidTicket" style="flex:1;">Void</button>
+      </div>
+    </div>
+  `;
+
+  if (isQuote) {
+    qs('#convertQuoteBtn')?.addEventListener('click', async () => {
+      try {
+        state.order = await api('/api/order/convert-quote', {
+          method: 'POST',
+          body: { order_id: state.order.id }
+        });
+        toast('Quotation converted to active sale!', 'success');
+        renderTicket();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+    qs('#printQuoteBtn')?.addEventListener('click', () => {
+      showReceiptModal(state.order);
+    });
+  } else {
+    qs('#checkoutBtn')?.addEventListener('click', () => showCheckoutModal(state.order));
+    if (hasCap('kot')) {
+      qs('#kotBtn')?.addEventListener('click', async () => {
+        try {
+          await api('/api/order/kot', { method: 'POST', body: { order_id: state.order.id } });
+          toast('Order sent to kitchen / bar KOT!', 'success');
+          showReceiptModal(state.order, true);
+        } catch(err) {
+          toast(err.message, 'error');
+        }
+      });
+    }
+  }
+
+  qs('#newTicket')?.addEventListener('click', () => { state.order = null; renderTicket(); });
+  qs('#voidTicket')?.addEventListener('click', async () => {
+    await setStatus('cancelled');
+    state.order = null;
+    renderTicket();
+  });
+}
+
+function selectedEmployeeName() {
+  return state.employees.find(emp => emp.id === state.selectedEmployeeId)?.name;
+}
+
+function showCheckoutModal(order) {
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width: 400px; text-align: left;">
+      <h3 style="margin-top:0">Checkout - ${order.ticket_no}</h3>
+      <p style="font-size: 18px; font-weight: bold; margin-bottom: 20px;">Total: ${money(order.total_cents)}</p>
+      
+      <div style="margin-bottom: 16px;">
+        <label style="display:block; margin-bottom: 8px; font-weight: 600;">Payment Method</label>
+        <select id="checkoutMethod" class="field" style="width: 100%; padding: 10px;">
+          <option value="cash">Cash</option>
+          <option value="mpesa">M-Pesa</option>
+        </select>
+      </div>
+
+      <div id="mpesaRefContainer" style="display: none; margin-bottom: 16px;">
+        <label style="display:block; margin-bottom: 8px; font-weight: 600;">MPESA No</label>
+        <input type="text" id="mpesaRef" class="field" placeholder="e.g. 0712345678" style="width: 100%; padding: 10px;" autocomplete="off">
+      </div>
+
+      <div id="checkoutMsg" style="margin-top: 10px; font-weight: 600; font-size: 14px; text-align: center;"></div>
+
+      <div class="qty-popup-actions" style="margin-top: 16px;">
+        <button class="ghost" id="chkCancel">Cancel</button>
+        <button class="primary" id="chkConfirm">Confirm & Print</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const methodSelect = overlay.querySelector('#checkoutMethod');
+  const refContainer = overlay.querySelector('#mpesaRefContainer');
+  const refInput = overlay.querySelector('#mpesaRef');
+
+  methodSelect.addEventListener('change', () => {
+    if (methodSelect.value === 'mpesa') {
+      refContainer.style.display = 'block';
+      refInput.focus();
+    } else {
+      refContainer.style.display = 'none';
+    }
+  });
+
+  overlay.querySelector('#chkCancel').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  const msgEl = overlay.querySelector('#checkoutMsg');
+
+  overlay.querySelector('#chkConfirm').addEventListener('click', async () => {
+    msgEl.textContent = '';
+    const method = methodSelect.value;
+    const ref = refInput.value.trim();
+    if (method === 'mpesa' && !ref) {
+      msgEl.style.color = 'var(--danger)';
+      msgEl.textContent = 'Please enter MPESA No.';
+      return;
+    }
+    
+    overlay.querySelector('#chkConfirm').disabled = true;
+    overlay.querySelector('#chkConfirm').textContent = 'Processing...';
+
+    try {
+      const paidOrder = await api('/api/order/pay', {
+        method: 'POST',
+        body: { order_id: order.id, payment_method: method, payment_ref: ref }
+      });
+      
+      if (method === 'mpesa') {
+        msgEl.style.color = 'var(--ok)';
+        msgEl.textContent = 'Processing M-Pesa payment...';
+        
+        setTimeout(() => {
+          msgEl.textContent = 'Payment successful! Generating receipt...';
+          setTimeout(() => {
+            overlay.remove();
+            showReceiptModal(paidOrder);
+            state.order = null; 
+            renderTicket();
+          }, 1000);
+        }, 2500);
+      } else {
+        msgEl.style.color = 'var(--ok)';
+        msgEl.textContent = 'Payment successful! Generating receipt...';
+        setTimeout(() => {
+          overlay.remove();
+          showReceiptModal(paidOrder);
+          state.order = null; 
+          renderTicket();
+        }, 800);
+      }
+      
+    } catch (e) {
+      msgEl.style.color = 'var(--danger)';
+      msgEl.textContent = e.message;
+      overlay.querySelector('#chkConfirm').disabled = false;
+      overlay.querySelector('#chkConfirm').textContent = 'Confirm & Print';
+    }
+  });
+}
+
+// ── Suppliers (replaces Tables) ───────────────────────────────────────────────
+async function renderSuppliers() {
+  const root = qs('[data-page="suppliers"]');
+  const suppliers = await api('/api/suppliers');
+  
+  root.innerHTML = `
+    <div class="panel-title-group" style="margin: 0 24px 20px; padding-top: 24px;">
+      <h2>Suppliers</h2>
+      <div style="display: flex; gap: 12px; margin-left: auto;">
+        <button class="add-btn" id="addSupplierBtn" style="background:var(--primary)">+ Add Supplier</button>
+        <button class="add-btn" id="refreshSuppliers" style="background:var(--ink)">Refresh</button>
+      </div>
+    </div>
+    
+    <div class="sales-table-container">
+      <table class="sales-table">
+        <thead>
+          <tr>
+            <th>Supplier Name</th>
+            <th>Phone</th>
+            <th>Email</th>
+            <th>Status</th>
+            <th style="text-align: right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${suppliers.map(s => `
+            <tr class="sales-row">
+              <td><strong>${s.name}</strong></td>
+              <td>${s.phone || '-'}</td>
+              <td>${s.email || '-'}</td>
+              <td>
+                <span class="pay-badge" style="${s.active ? 'background:#dcfce7;color:#16a34a;' : 'background:#f1f5f9;color:#64748b;'}">
+                  ${s.active ? 'Active' : 'Inactive'}
+                </span>
+              </td>
+              <td style="text-align: right">
+                <button class="view-receipt-btn supplier-view-btn" data-id="${s.id}" style="margin-right: 4px;">View</button>
+                <button class="view-receipt-btn supplier-edit-btn" data-id="${s.id}">Edit</button>
+              </td>
+            </tr>
+          `).join('') || `<tr><td colspan="5" class="empty" style="text-align:center; padding: 40px;">No suppliers found</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+  
+  qs('#refreshSuppliers').addEventListener('click', renderSuppliers);
+  qs('#addSupplierBtn').addEventListener('click', () => showSupplierModal());
+  
+  qsa('.supplier-edit-btn', root).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.id);
+      const supplier = suppliers.find(s => s.id === id);
+      if (supplier) showSupplierModal(supplier);
+    });
+  });
+
+  qsa('.supplier-view-btn', root).forEach(btn => {
+    btn.addEventListener('click', () => {
+      showSupplierDetails(Number(btn.dataset.id));
+    });
+  });
+}
+
+async function showSupplierDetails(id) {
+  const supplier = await api(`/api/supplier/detail?id=${id}`);
+  
+  const formatDate = (ts) => {
+    if (!ts) return '-';
+    const d = new Date(ts * 1000);
+    return d.toLocaleString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width: 500px; text-align: left;">
+      <h2 style="margin-top:0">${supplier.name}</h2>
+      <p style="color:var(--muted); margin-bottom: 20px;">Total Purchases: <strong style="color:var(--ink)">${money(supplier.total_purchases)}</strong></p>
+      
+      <div style="font-weight:700; font-size:12px; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:8px;">Products Supplied</div>
+      <div style="max-height:300px; overflow-y:auto; margin-bottom:20px;">
+        ${supplier.products.length ? supplier.products.map(p => `
+          <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f1f5f9;">
+            <div>
+              <div style="font-weight:600;">${p.name}</div>
+              <div style="font-size:12px; color:var(--muted)">Last Delivery: ${formatDate(p.last_delivery)}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-weight:700; color:var(--primary-dark)">${money(p.cost_cents)} cost</div>
+              <div style="font-size:12px; color:var(--muted)">Stock: ${p.stock_qty}</div>
+            </div>
+          </div>
+        `).join('') : '<div style="color:var(--muted); font-size:14px; padding:10px 0;">No products supplied yet.</div>'}
+      </div>
+
+      <div class="qty-popup-actions">
+        <button class="primary" id="closeSupplierView" style="width:100%">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('#closeSupplierView').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+}
+
+function showSupplierModal(supplier = null) {
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width: 450px; text-align: left;">
+      <h3 style="margin-top:0">${supplier ? 'Edit Supplier' : 'New Supplier'}</h3>
+      <form id="supplierForm" style="display:flex; flex-direction:column; gap:16px;">
+        <div>
+          <label style="display:block; margin-bottom:6px; font-weight:600; font-size:14px;">Supplier Name *</label>
+          <input class="field" name="name" required value="${supplier ? supplier.name : ''}" style="width:100%; padding:10px;">
+        </div>
+        <div style="display:flex; gap:16px;">
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:6px; font-weight:600; font-size:14px;">Phone Number</label>
+            <input class="field" name="phone" value="${supplier?.phone || ''}" style="width:100%; padding:10px;">
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; margin-bottom:6px; font-weight:600; font-size:14px;">Status</label>
+            <select name="active" class="field" style="width:100%; padding:10px;">
+              <option value="1" ${supplier?.active === 0 ? '' : 'selected'}>Active</option>
+              <option value="0" ${supplier?.active === 0 ? 'selected' : ''}>Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:6px; font-weight:600; font-size:14px;">Email Address</label>
+          <input type="email" class="field" name="email" value="${supplier?.email || ''}" style="width:100%; padding:10px;">
+        </div>
+        
+        <div id="supplierMsg" style="margin-top:4px; font-weight:600; font-size:14px; text-align:center;"></div>
+        
+        <div class="qty-popup-actions" style="margin-top:16px;">
+          <button type="button" class="ghost" id="cancelSupplierBtn">Cancel</button>
+          <button type="submit" class="primary">Save Supplier</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('#cancelSupplierBtn').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  const msgEl = overlay.querySelector('#supplierMsg');
+  const submitBtn = overlay.querySelector('button[type="submit"]');
+
+  overlay.querySelector('#supplierForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    msgEl.textContent = '';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+    
+    const fd = new FormData(e.target);
+    const payload = Object.fromEntries(fd.entries());
+    if (supplier) payload.id = supplier.id;
+    
+    try {
+      await api('/api/admin/supplier', { method: 'POST', body: payload });
+      msgEl.style.color = 'var(--ok)';
+      msgEl.textContent = 'Supplier saved successfully!';
+      
+      setTimeout(() => {
+        close();
+        renderSuppliers();
+      }, 800);
+      
+    } catch (err) {
+      msgEl.style.color = 'var(--danger)';
+      msgEl.textContent = err.message;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Save Supplier';
+    }
+  });
+}
+
+// ── Sales History (replaces Orders) ──────────────────────────────────────────
+async function renderSales() {
+  const root = qs('[data-page="sales"]');
+  const orders = await api('/api/orders?status=paid');
+  
+  const formatDate = (ts) => {
+    if (!ts) return '-';
+    const d = new Date(ts * 1000);
+    return d.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  };
+
+  root.innerHTML = `
+    <div class="panel-title-group" style="margin: 0 24px 20px; padding-top: 24px;">
+      <h2>Sales History</h2>
+      <button class="add-btn" id="refreshSales" style="background:var(--ink)">Refresh</button>
+    </div>
+    
+    <div class="sales-table-container">
+      <table class="sales-table">
+        <thead>
+          <tr>
+            <th>Receipt No.</th>
+            <th>Date</th>
+            <th>Cashier</th>
+            <th>Payment</th>
+            <th style="text-align: right">Total</th>
+            <th style="text-align: right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${orders.map(o => `
+            <tr class="sales-row" data-id="${o.id}">
+              <td class="font-mono"><strong>${o.ticket_no}</strong></td>
+              <td class="text-muted">${formatDate(o.updated_at)}</td>
+              <td>${o.employee_name || '-'}</td>
+              <td>
+                <span class="pay-badge ${o.payment_method === 'mpesa' ? 'mpesa' : 'cash'}">
+                  ${o.payment_method === 'mpesa' ? 'M-Pesa' : 'Cash'}
+                </span>
+                ${o.payment_ref ? `<div class="pay-ref">${o.payment_ref}</div>` : ''}
+              </td>
+              <td class="sales-total" style="text-align: right">${money(o.total_cents)}</td>
+              <td style="text-align: right">
+                <button class="view-receipt-btn">View</button>
+              </td>
+            </tr>
+          `).join('') || `<tr><td colspan="6" class="empty" style="text-align:center; padding: 40px;">No sales found</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+  
+  qs('#refreshSales').addEventListener('click', renderSales);
+  
+  qsa('.sales-row', root).forEach(row => {
+    row.addEventListener('click', async () => {
+      const id = row.dataset.id;
+      try {
+        const fullOrder = await api(`/api/order?id=${id}`);
+        showReceiptModal(fullOrder);
+      } catch (err) {
+        toast('Failed to load receipt', 'error');
+      }
+    });
+  });
+}
+
+// ── Cashier Payments ──────────────────────────────────────────────────────────
+async function renderCashier() {
+  const root = qs('[data-page="cashier"]');
+  const existingSearch = qs('#paymentSearch')?.value || '';
+  const orders = await api(`/api/payments?q=${encodeURIComponent(existingSearch)}`);
+  root.innerHTML = `
+    <div class="panel-head">
+      <h2>Pending Payments</h2>
+      <div class="head-actions">
+        <input class="field compact-field" id="paymentSearch" placeholder="Ticket, customer, staff" value="${existingSearch}">
+        <button class="primary" id="refreshCashier">Refresh</button>
+      </div>
+    </div>
+    <div class="content-grid">
+      ${orders.map(o => `
+        <article class="order-card ${o.status}" data-order="${o.id}">
+          <span class="badge">${o.status}</span>
+          <strong>${o.ticket_no}</strong>
+          <span>${o.order_type} — ${o.employee_name || '-'}</span>
+          ${o.customer_name ? `<span>Customer: ${o.customer_name}</span>` : ''}
+          <strong>${money(o.total_cents)}</strong>
+          <input class="field pay-ref" placeholder="M-Pesa code / reference">
+          <div class="pay-actions">
+            <button class="primary pay-btn" data-method="mpesa">M-Pesa</button>
+            <button class="secondary pay-btn" data-method="cash">Cash</button>
+            <button class="secondary pay-btn" data-method="card">Card</button>
+          </div>
+          <button class="receipt-link-btn" data-receipt-order="${o.id}">View Receipt</button>
+        </article>
+      `).join('') || '<div class="empty">No pending payments</div>'}
+    </div>
+  `;
+
+  qs('#refreshCashier').addEventListener('click', renderCashier);
+  qs('#paymentSearch').addEventListener('keydown', event => {
+    if (event.key === 'Enter') renderCashier();
+  });
+
+  qsa('[data-receipt-order]', root).forEach(btn => btn.addEventListener('click', async () => {
+    const orderId = Number(btn.dataset.receiptOrder);
+    try {
+      const allOrders = await api('/api/payments?q=');
+      const summary = allOrders.find(o => o.id === orderId);
+      if (summary) showReceiptModal({ ...summary, items: [] });
+    } catch(e) { /* ignore */ }
+  }));
+
+  qsa('.pay-btn', root).forEach(btn => btn.addEventListener('click', async () => {
+    const card = btn.closest('[data-order]');
+    const orderId = Number(card.dataset.order);
+    const ref = qs('.pay-ref', card).value.trim();
+    await api('/api/order/pay', {
+      method: 'POST',
+      body: { order_id: orderId, payment_method: btn.dataset.method, payment_ref: ref },
+    });
+    await renderCashier();
+  }));
+}
+
+// ── Product Admin (replaces Menu Admin) ──────────────────────────────────────
+let productSearch = '';
+let productCategoryFilter = '';
+
+function renderProductAdmin() {
+  const root = qs('[data-page="products"]');
+
+  root.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title-group">
+        <h2>Products</h2>
+        <span class="badge" id="productCountBadge">${state.items.length} active</span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button type="button" class="secondary barcode-scan-btn" id="scanAddProductBtn" style="padding:9px 14px; font-size:13px;" title="Scan Barcode to Add or Lookup Product">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5v14M8 5v14M12 5v14M17 5v14M21 5v14"/>
+          </svg>
+          <span>Scan Barcode / Add</span>
+        </button>
+        <button class="primary add-btn" id="showAddProductModal">+ Add Product</button>
+      </div>
+    </div>
+    
+    <div class="toolbar">
+      <div class="search-bar">
+        <span class="search-icon">🔍</span>
+        <input type="text" class="field search-field" id="productSearchInput" placeholder="Search by name or SKU..." value="${productSearch}">
+      </div>
+      <select class="field cat-filter" id="productCatFilter">
+        <option value="">All Categories</option>
+        ${state.categories.map(c => `<option value="${c.id}" ${productCategoryFilter == c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="content-grid product-grid" id="productAdminGrid"></div>
+  `;
+
+  // Global Event Listeners for the page
+  const searchInput = qs('#productSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', e => {
+      productSearch = e.target.value;
+      renderProductAdminGrid();
+    });
+  }
+
+  qs('#productCatFilter')?.addEventListener('change', e => {
+    productCategoryFilter = e.target.value;
+    renderProductAdminGrid();
+  });
+
+  qs('#showAddProductModal')?.addEventListener('click', () => showProductModal());
+  qs('#scanAddProductBtn')?.addEventListener('click', () => showBarcodeModal('product'));
+
+  // Close menus on outside click
+  document.addEventListener('click', () => {
+    qsa('.action-menu', root).forEach(m => m.classList.add('hidden'));
+  });
+
+  renderProductAdminGrid();
+}
+
+function renderProductAdminGrid() {
+  const grid = qs('#productAdminGrid');
+  if (!grid) return;
+  const root = qs('[data-page="products"]');
+  
+  const filteredItems = state.items.filter(item => {
+    const matchesSearch = item.name.toLowerCase().includes(productSearch.toLowerCase()) || 
+                          (item.sku && item.sku.toLowerCase().includes(productSearch.toLowerCase())) ||
+                          (item.barcode && item.barcode.toLowerCase().includes(productSearch.toLowerCase()));
+    const matchesCat = productCategoryFilter ? item.category_id === Number(productCategoryFilter) : true;
+    return matchesSearch && matchesCat;
+  });
+
+  const badge = qs('#productCountBadge');
+  if (badge) badge.textContent = `${filteredItems.length} active`;
+
+  grid.innerHTML = filteredItems.map(item => {
+    const isExpired = item.expiry_date && new Date(item.expiry_date) < new Date();
+    const isExpiringSoon = item.expiry_date && !isExpired && (new Date(item.expiry_date) - new Date() < 30 * 86400000);
+    const lowStock = (item.stock_qty || 0) <= (item.reorder_level || 5);
+
+    return `
+      <article class="menu-card product-card" data-id="${item.id}">
+        <div class="card-header">
+          <span class="badge" style="background:${item.color || '#334155'};color:white">${categoryName(item.category_id)}</span>
+          <div class="card-actions">
+            <button class="action-menu-btn">⋮</button>
+            <div class="action-menu hidden">
+              <button class="edit-btn" data-id="${item.id}">Edit Product</button>
+              <button class="delete-btn" data-id="${item.id}">Delete</button>
+            </div>
+          </div>
+        </div>
+        <strong>${item.name}</strong>
+        ${item.strength ? `<div style="font-size:12px; color:#2563eb; font-weight:700;">${item.strength}</div>` : ''}
+        ${item.manufacturer ? `<small style="color:var(--muted); font-size:11px;">Mfr: ${item.manufacturer}</small>` : ''}
+        ${item.sku ? `<small class="sku-text">SKU: ${item.sku}</small>` : '<small class="sku-text">No SKU</small>'}
+        ${item.barcode ? `<small class="sku-text" style="color:var(--muted)">Barcode: ${item.barcode}</small>` : ''}
+
+        ${hasCap('batches_expiry') && item.batch_no ? `<small style="font-size:11px; color:#475569;">Batch: <strong>${item.batch_no}</strong></small>` : ''}
+        ${hasCap('batches_expiry') && item.expiry_date ? `
+          <div style="margin-top:2px;">
+            <span class="expiry-badge" style="font-size:11px; padding:2px 6px; border-radius:4px; font-weight:700; ${isExpired ? 'background:#fee2e2; color:#b91c1c;' : (isExpiringSoon ? 'background:#fef3c7; color:#b45309;' : 'background:#dcfce7; color:#15803d;')}">
+              ${isExpired ? 'EXPIRED' : (isExpiringSoon ? 'Exp Soon' : 'Exp')}: ${item.expiry_date}
+            </span>
+          </div>
+        ` : ''}
+
+        ${hasCap('variants') && item.variants_json ? `
+          <div style="margin-top:2px;">
+            <span class="cap-pill" style="font-size:11px; background:var(--line); color:var(--ink); font-weight:600;">Variants: ${item.variants_json}</span>
+          </div>
+        ` : ''}
+        
+        <div class="price-tier">
+          <div class="price-row">
+            <span class="price-label">Retail (Sell)</span>
+            <span class="price-value sell-price">${money(item.price_cents)}</span>
+          </div>
+          ${hasCap('wholesale_pricing') && item.wholesale_price_cents ? `
+            <div class="price-row">
+              <span class="price-label">Wholesale</span>
+              <span class="price-value" style="color:#2563eb; font-weight:700;">${money(item.wholesale_price_cents)}</span>
+            </div>
+          ` : `
+            <div class="price-row">
+              <span class="price-label">Cost</span>
+              <span class="price-value cost-price">${money(item.cost_cents || 0)}</span>
+            </div>
+          `}
+        </div>
+        
+        <div class="card-footer">
+          <small style="color:${lowStock ? '#b91c1c; font-weight:700;' : 'var(--muted)'}">
+            Stock: ${item.stock_qty !== undefined ? item.stock_qty : '?'} ${item.unit || 'pcs'}
+          </small>
+          ${hasCap('reorder_levels') && item.reorder_level ? `<small style="color:var(--muted)">Min: ${item.reorder_level}</small>` : ''}
+        </div>
+      </article>
+    `;
+  }).join('') || '<div class="empty">No products match your criteria</div>';
+
+  // Dropdown toggles
+  qsa('.action-menu-btn', grid).forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const menu = btn.nextElementSibling;
+      const isHidden = menu.classList.contains('hidden');
+      qsa('.action-menu', root).forEach(m => m.classList.add('hidden')); // close all
+      if (isHidden) menu.classList.remove('hidden');
+    });
+  });
+
+  qsa('.edit-btn', grid).forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const item = state.items.find(i => i.id == btn.dataset.id);
+      if (item) showProductModal(item);
+    });
+  });
+
+  qsa('.delete-btn', grid).forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm('Are you sure you want to completely delete this product?')) return;
+      const item = state.items.find(i => i.id == btn.dataset.id);
+      if (item) {
+        try {
+          const payload = await api('/api/menu/item?id=' + item.id, { method: 'DELETE' });
+          if (payload.error) {
+            alert(payload.error);
+            return;
+          }
+          state.categories = payload.categories;
+          state.items = payload.items;
+          renderProductAdmin();
+        } catch (err) {
+          alert('Could not delete product. It may have sales history tied to it.');
+        }
+      }
+    });
+  });
+}
+
+// ── Online Image Search Modal ────────────────────────────────────────────────
+function showImageSearchModal(query, onSelect) {
+  const overlay = document.createElement('div');
+  overlay.className = 'qty-popup-overlay';
+  overlay.style.zIndex = '10000';
+  overlay.innerHTML = `
+    <div class="qty-popup" style="max-width: 500px; width: 90vw; max-height: 85vh; display:flex; flex-direction:column; text-align: left; padding: 22px; background:var(--panel); border:1px solid var(--line); border-radius:14px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:20px;">🔍</span>
+          <h3 style="margin:0; font-size:17px; font-weight:700; color:var(--ink);">Search Product Image</h3>
+        </div>
+        <button class="modal-close" id="imgModalClose" style="background:none; border:none; font-size:24px; color:var(--muted); cursor:pointer; line-height:1;">&times;</button>
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin:0 0 14px; line-height:1.4;">
+        Finds the single best matching product photo online. Click <strong>Use This Image</strong> to download and optimize it locally with Pillow.
+      </p>
+      
+      <div style="display:flex; gap:8px; margin-bottom:14px;">
+        <input class="field" id="imgSearchInput" placeholder="Enter product name..." value="${query || ''}" style="flex:1; padding:9px 12px; font-size:13px;">
+        <button class="primary" id="doImgSearchBtn" style="padding:9px 16px; font-size:13px; font-weight:700; white-space:nowrap;">Search</button>
+      </div>
+
+      <div id="imgSearchResults" style="min-height: 240px; display:flex; flex-direction:column; justify-content:center;">
+        <div style="text-align:center; color:var(--muted); padding:30px 0; font-size:13px;">Type a product name and click Search</div>
+      </div>
+
+      <div id="imgSearchStatus" style="font-size:12px; color:var(--muted); margin-top:8px; text-align:center;"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('#imgModalClose').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  const input = overlay.querySelector('#imgSearchInput');
+  const resultsBox = overlay.querySelector('#imgSearchResults');
+  const statusEl = overlay.querySelector('#imgSearchStatus');
+  const searchBtn = overlay.querySelector('#doImgSearchBtn');
+
+  const executeSearch = async () => {
+    const q = input.value.trim();
+    if (!q) return;
+    searchBtn.disabled = true;
+    searchBtn.textContent = 'Searching...';
+    resultsBox.innerHTML = `
+      <div style="text-align:center; padding:40px 0;">
+        <span style="font-size:28px; display:inline-block; animation:spin 1s linear infinite;">⏳</span>
+        <p style="margin-top:10px; color:var(--muted); font-size:13px;">Finding best product photo for "${q}"...</p>
+      </div>
+    `;
+    statusEl.textContent = '';
+
+    try {
+      const data = await api(`/api/product/image-search?q=${encodeURIComponent(q)}&limit=1`);
+      searchBtn.disabled = false;
+      searchBtn.textContent = 'Search';
+
+      const imagesList = data.images || data.results || [];
+      const img = imagesList[0];
+
+      if (!img) {
+        resultsBox.innerHTML = `
+          <div style="text-align:center; color:var(--muted); padding:35px 0;">
+            <div style="font-size:28px; margin-bottom:6px;">📷</div>
+            <div>No image found for "${q}".</div>
+            <div style="font-size:12px; margin-top:4px;">Try a broader keyword (e.g. "Cetirizine", "Cement", "Burger").</div>
+          </div>
+        `;
+        return;
+      }
+
+      const imgUrl = img.full || img.url || img.thumb || img.thumbnail;
+      const displayThumb = img.thumb || img.thumbnail || imgUrl;
+
+      resultsBox.innerHTML = `
+        <div style="background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:14px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+          <div style="width:100%; height:230px; background:var(--panel); border-radius:8px; display:flex; align-items:center; justify-content:center; overflow:hidden; border:1px solid var(--line); position:relative;">
+            <img src="${displayThumb}" alt="${img.title || 'Product'}" style="max-height:100%; max-width:100%; object-fit:contain;" onerror="this.src='/static/uploads/default.png';">
+            <span style="position:absolute; top:8px; right:8px; font-size:11px; font-weight:700; background:rgba(0,0,0,0.75); color:#cbd5e1; padding:3px 8px; border-radius:6px; text-transform:capitalize;">${img.source || 'web'}</span>
+          </div>
+          <div style="text-align:center; width:100%;">
+            <div style="font-size:13px; font-weight:700; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${img.title || ''}">
+              ${img.title || q}
+            </div>
+          </div>
+          <button type="button" id="useThisImgBtn" class="primary" style="width:100%; padding:12px 20px; font-size:14px; font-weight:700; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+            <span>✓</span> Use This Image
+          </button>
+        </div>
+      `;
+
+      resultsBox.querySelector('#useThisImgBtn')?.addEventListener('click', async () => {
+        const btn = resultsBox.querySelector('#useThisImgBtn');
+        btn.disabled = true;
+        btn.textContent = 'Optimizing and saving with Pillow...';
+        statusEl.innerHTML = `<span style="color:var(--primary); font-weight:700;">Processing with Pillow...</span>`;
+
+        try {
+          const saved = await api('/api/product/save-image', {
+            method: 'POST',
+            body: { image_url: imgUrl, name: q }
+          });
+          if (saved.local_url) {
+            onSelect(saved.local_url);
+            toast('Image saved & optimized!', 'success');
+            close();
+          } else {
+            throw new Error('Image save failed');
+          }
+        } catch(err) {
+          statusEl.innerHTML = `<span style="color:var(--danger); font-weight:700;">Failed to download: ${err.message}</span>`;
+          btn.disabled = false;
+          btn.textContent = '✓ Use This Image';
+        }
+      });
+
+    } catch (err) {
+      searchBtn.disabled = false;
+      searchBtn.textContent = 'Search';
+      resultsBox.innerHTML = `<div style="text-align:center; color:var(--danger); padding:30px 0; font-size:13px;">Search failed: ${err.message}</div>`;
+    }
+  };
+
+  searchBtn.addEventListener('click', executeSearch);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') executeSearch(); });
+
+  if (query) executeSearch();
+}
+
+function showProductModal(item = null) {
+  document.getElementById('productModal')?.remove();
+  
+  const isEdit = !!item;
+  let defaultSku = '';
+  if (!isEdit) {
+    const skus = state.items.map(i => parseInt(i.sku) || 0);
+    const maxSku = skus.length > 0 ? Math.max(...skus) : 0;
+    defaultSku = maxSku + 1;
+  }
+  const overlay = document.createElement('div');
+  overlay.id = 'productModal';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box" style="width:540px; max-width:92vw; max-height:90vh; overflow-y:auto;">
+      <div class="modal-head">
+        <h3>${isEdit ? 'Edit Product' : 'Add Product'}</h3>
+        <button class="modal-close" id="pmClose" type="button">&times;</button>
+      </div>
+      <form id="pmForm" class="modal-form">
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label>Product Image</label>
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+              <div id="imgPreview" style="width:64px; height:64px; background:#f1f5f9; border-radius:8px; border:1px solid var(--line); display:flex; align-items:center; justify-content:center; overflow:hidden;">
+                ${item?.image_url ? `<img src="${item.image_url}" style="width:100%;height:100%;object-fit:contain;padding:4px;box-sizing:border-box;">` : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:24px;height:24px;color:var(--muted)"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>'}
+              </div>
+              <input type="file" id="imgUpload" accept="image/*" class="field" style="flex:1; min-width:160px; padding:6px;">
+              <button type="button" class="secondary" id="searchImgOnlineBtn" style="padding: 7px 12px; font-size: 13px; white-space:nowrap;">🔍 Search Online</button>
+              <input type="hidden" name="image_base64" id="imgBase64">
+              <input type="hidden" name="image_url" id="imgUrlInput" value="${item?.image_url || ''}">
+            </div>
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label>Product Name *</label>
+            <input class="field" name="name" id="productNameInput" value="${item?.name || ''}" required>
+          </div>
+          <div class="form-group">
+            <label>Category</label>
+            <select class="field" name="category_id">
+              ${state.categories.map(c => `<option value="${c.id}" ${item?.category_id == c.id ? 'selected' : ''}>${c.name}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>SKU</label>
+            <input class="field" name="sku" value="${item?.sku || defaultSku}">
+          </div>
+          ${hasCap('barcode') ? `
+            <div class="form-group">
+              <label style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Barcode</span>
+                <span style="display:flex; gap:6px;">
+                  <button type="button" class="btn-xs" id="pmScanBarcodeBtn" title="Scan with camera or barcode reader">📷 Scan</button>
+                  <button type="button" class="btn-xs" id="pmGenBarcodeBtn" title="Generate random EAN barcode">🎲 Generate</button>
+                </span>
+              </label>
+              <input class="field" id="pmBarcodeInput" name="barcode" value="${item?.barcode || ''}" placeholder="Scan or enter barcode">
+            </div>
+          ` : ''}
+          <div class="form-group">
+            <label>Unit of Measure</label>
+            <input class="field" name="unit" placeholder="pcs, kg, m, tin" value="${item?.unit || 'pcs'}">
+          </div>
+          <div class="form-group">
+            <label>Stock Qty</label>
+            <input class="field" name="stock_qty" type="number" step="${item?.decimal_qty_enabled || hasCap('decimal_qty') ? '0.01' : '1'}" value="${item?.stock_qty !== undefined ? item.stock_qty : 0}">
+          </div>
+          ${hasCap('reorder_levels') ? `
+            <div class="form-group">
+              <label>Reorder Level (Min Stock)</label>
+              <input class="field" name="reorder_level" type="number" value="${item?.reorder_level || 5}">
+            </div>
+          ` : ''}
+          <div class="form-group">
+            <label>Cost Price</label>
+            <input class="field" name="cost" type="number" step="0.01" min="0" value="${item ? (item.cost_cents || 0)/100 : ''}">
+          </div>
+          <div class="form-group">
+            <label>Selling Price (Retail) *</label>
+            <input class="field" name="price" type="number" step="0.01" min="0" value="${item ? (item.price_cents || 0)/100 : ''}" required>
+          </div>
+          ${hasCap('wholesale_pricing') ? `
+            <div class="form-group">
+              <label>Wholesale Price (KES)</label>
+              <input class="field" name="wholesale_price" type="number" step="0.01" min="0" value="${item?.wholesale_price_cents ? (item.wholesale_price_cents)/100 : ''}">
+            </div>
+          ` : ''}
+          ${hasCap('batches_expiry') ? `
+            <div class="form-group">
+              <label>Batch Number</label>
+              <input class="field" name="batch_no" value="${item?.batch_no || ''}" placeholder="e.g. BATCH-2024-01">
+            </div>
+            <div class="form-group">
+              <label>Expiry Date</label>
+              <input class="field" name="expiry_date" type="date" value="${item?.expiry_date || ''}">
+            </div>
+          ` : ''}
+          ${hasCap('manufacturer_strength') ? `
+            <div class="form-group">
+              <label>Manufacturer / Brand</label>
+              <input class="field" name="manufacturer" value="${item?.manufacturer || ''}" placeholder="e.g. GSK, Bayer, Nike">
+            </div>
+            <div class="form-group">
+              <label>Strength / Dosage</label>
+              <input class="field" name="strength" value="${item?.strength || ''}" placeholder="e.g. 500mg, 10ml, 50ml">
+            </div>
+          ` : ''}
+          ${hasCap('decimal_qty') ? `
+            <div class="form-group" style="grid-column: 1 / -1; display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="decimalQtyCheck" name="decimal_qty_enabled" value="1" ${item?.decimal_qty_enabled ? 'checked' : ''}>
+              <label for="decimalQtyCheck" style="margin:0; cursor:pointer; font-size:13px; font-weight:600;">Allow Decimal Quantities (e.g. 1.5 kg, 2.75 m)</label>
+            </div>
+          ` : ''}
+          ${hasCap('variants') ? `
+            <div class="form-group" style="grid-column: 1 / -1;">
+              <label>Product Variants (e.g. Small, Medium, Large or Shade 01, Shade 02)</label>
+              <input class="field" name="variants_json" value="${item?.variants_json ? (typeof item.variants_json === 'string' ? item.variants_json : JSON.stringify(item.variants_json)) : ''}" placeholder="e.g. Small, Medium, Large">
+            </div>
+          ` : ''}
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="pmCancel">Cancel</button>
+          <button type="submit" class="primary">${isEdit ? 'Save Changes' : 'Add Product'}</button>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  
+  const close = () => overlay.remove();
+  qs('#pmClose', overlay).addEventListener('click', close);
+  qs('#pmCancel', overlay).addEventListener('click', close);
+  
+  const imgUpload = qs('#imgUpload', overlay);
+  const imgPreview = qs('#imgPreview', overlay);
+  const imgBase64 = qs('#imgBase64', overlay);
+  const imgUrlInput = qs('#imgUrlInput', overlay);
+
+  qs('#searchImgOnlineBtn', overlay)?.addEventListener('click', () => {
+    const pName = qs('#productNameInput', overlay)?.value || item?.name || '';
+    showImageSearchModal(pName, (localUrl) => {
+      imgUrlInput.value = localUrl;
+      imgBase64.value = '';
+      imgPreview.innerHTML = `<img src="${localUrl}" style="width:100%;height:100%;object-fit:contain;padding:4px;box-sizing:border-box;">`;
+    });
+  });
+
+  if (imgUpload) {
+    imgUpload.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX = 400;
+          let w = img.width, h = img.height;
+          if (w > h) { if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; } }
+          else        { if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; } }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          const compressed = canvas.toDataURL('image/jpeg', 0.75);
+          imgBase64.value = compressed;
+          imgPreview.innerHTML = `<img src="${compressed}" style="width:100%;height:100%;object-fit:contain;padding:4px;box-sizing:border-box;">`;
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  overlay.querySelector('#pmScanBarcodeBtn')?.addEventListener('click', () => {
+    showBarcodeModal('product', (code) => {
+      const bInput = overlay.querySelector('#pmBarcodeInput');
+      if (bInput) {
+        bInput.value = code;
+        toast(`Scanned barcode: ${code}`, 'success');
+      }
+    });
+  });
+
+  overlay.querySelector('#pmGenBarcodeBtn')?.addEventListener('click', () => {
+    const randomEan = '616' + Math.floor(100000000 + Math.random() * 900000000);
+    const bInput = overlay.querySelector('#pmBarcodeInput');
+    if (bInput) {
+      bInput.value = randomEan;
+      toast(`Generated barcode: ${randomEan}`, 'info');
+    }
+  });
+
+  qs('#pmForm', overlay).addEventListener('submit', async e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    if (isEdit) data.id = item.id;
+    if (item) {
+      data.color = item.color;
+      data.active = item.active;
+    }
+    const payload = await api('/api/menu/item', { method: 'POST', body: data });
+    state.categories = payload.categories;
+    state.items = payload.items;
+    close();
+    renderProductAdmin();
+  });
+}
+
+// ── Stock Page (replaces Kitchen) ────────────────────────────────────────────
+let stockSearch = '';
+let stockFilter = 'all'; // all, low, in_stock
+
+async function renderStock() {
+  const root = qs('[data-page="stock"]');
+  const allItems = await api('/api/stock');
+  
+  const lowStockCount = allItems.filter(i => (i.stock_qty || 0) <= 5).length;
+  
+  const filteredItems = allItems.filter(item => {
+    const matchesSearch = item.name.toLowerCase().includes(stockSearch.toLowerCase()) || 
+                          (item.sku && item.sku.toLowerCase().includes(stockSearch.toLowerCase()));
+    
+    let matchesFilter = true;
+    if (stockFilter === 'low') matchesFilter = (item.stock_qty || 0) <= 5;
+    if (stockFilter === 'in_stock') matchesFilter = (item.stock_qty || 0) > 5;
+    
+    return matchesSearch && matchesFilter;
+  });
+
+  root.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title-group">
+        <h2>Stock Levels</h2>
+      </div>
+      <button class="primary" id="refreshStock">Refresh</button>
+    </div>
+    
+    <div class="toolbar stock-toolbar">
+      <div class="filter-pills">
+        <button class="pill ${stockFilter === 'all' ? 'active' : ''}" data-filter="all">All Inventory</button>
+        <button class="pill alert-pill ${stockFilter === 'low' ? 'active' : ''}" data-filter="low">
+          Low Stock Alert <span class="pill-badge">${lowStockCount}</span>
+        </button>
+        <button class="pill ${stockFilter === 'in_stock' ? 'active' : ''}" data-filter="in_stock">In Stock</button>
+      </div>
+      <div class="search-bar">
+        <span class="search-icon">🔍</span>
+        <input type="text" class="field search-field" id="stockSearchInput" placeholder="Search by name or SKU..." value="${stockSearch}">
+      </div>
+    </div>
+
+    <div class="content-grid stock-grid">
+      ${filteredItems.map(item => {
+        const low = (item.stock_qty || 0) <= 5;
+        return `
+          <article class="stock-card ${low ? 'low-stock' : 'in-stock'}" data-id="${item.id}">
+            <div class="card-header">
+              <span class="badge status-badge">${low ? 'LOW STOCK' : 'In Stock'}</span>
+              <span class="category-text">${categoryName(item.category_id)}</span>
+            </div>
+            <strong>${item.name}</strong>
+            ${item.sku ? `<small class="sku-text">SKU: ${item.sku}</small>` : '<small class="sku-text">No SKU</small>'}
+            
+            <div class="stock-display">
+              <span class="stock-value">${item.stock_qty || 0}</span>
+              <span class="stock-unit">${item.unit || 'pcs'}</span>
+            </div>
+            
+            <div class="card-footer">
+              ${low ? `
+                <button class="danger restock-btn" data-id="${item.id}">Restock / Reorder</button>
+              ` : `
+                <div class="inline-adjust">
+                  <button class="adjust-btn minus" data-id="${item.id}">−</button>
+                  <span class="adjust-label">Adjust</span>
+                  <button class="adjust-btn plus" data-id="${item.id}">+</button>
+                </div>
+              `}
+            </div>
+          </article>
+        `;
+      }).join('') || '<div class="empty">No products match your criteria</div>'}
+    </div>
+  `;
+  
+  qs('#refreshStock')?.addEventListener('click', renderStock);
+  
+  const stInp = qs('#stockSearchInput');
+  if (stInp) {
+    stInp.addEventListener('input', e => {
+      stockSearch = e.target.value;
+      renderStock();
+      const inp = qs('#stockSearchInput');
+      inp.focus();
+      inp.selectionStart = inp.selectionEnd = inp.value.length;
+    });
+  }
+
+  qsa('.pill', root).forEach(btn => {
+    btn.addEventListener('click', () => {
+      stockFilter = btn.dataset.filter;
+      renderStock();
+    });
+  });
+
+  // Adjust actions
+  qsa('.adjust-btn', root).forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const isPlus = btn.classList.contains('plus');
+      const change = isPlus ? 1 : -1;
+      
+      try {
+        await api('/api/stock/adjust', {
+          method: 'POST',
+          body: { product_id: id, qty_change: change, reason: 'inline_adjustment' }
+        });
+        await bootstrap(); // refresh global catalog
+        renderStock();
+      } catch (err) {
+        alert('Failed to adjust stock. Ensure you have manager privileges.');
+      }
+    });
+  });
+
+  qsa('.restock-btn', root).forEach(btn => {
+    btn.addEventListener('click', () => {
+      alert('Restock request recorded for product ID: ' + btn.dataset.id);
+    });
+  });
+}
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+async function renderReports(period = 'today') {
+  const root = qs('[data-page="reports"]');
+  const report = await api(`/api/reports?period=${period}`);
+  
+  const profit = report.totals.sales - report.totals.costs;
+  const margin = report.totals.sales > 0 ? Math.round((profit / report.totals.sales) * 100) : 0;
+  
+  let mpesaTotal = 0;
+  let cashTotal = 0;
+  if (report.payments) {
+    report.payments.forEach(p => {
+      if (p.method === 'mpesa') mpesaTotal += p.amount;
+      else cashTotal += p.amount;
+    });
+  }
+
+  root.innerHTML = `
+    <div class="panel-title-group" style="margin: 0 24px 20px; padding-top: 24px; display: flex; justify-content: space-between; align-items: center;">
+      <h2>Business Analytics</h2>
+      <div style="display:flex; gap: 8px;">
+        <select id="reportPeriod" class="field" style="padding: 6px 12px; height: 36px;">
+          <option value="today" ${period === 'today' ? 'selected' : ''}>Today</option>
+          <option value="yesterday" ${period === 'yesterday' ? 'selected' : ''}>Yesterday</option>
+          <option value="week" ${period === 'week' ? 'selected' : ''}>Last 7 Days</option>
+          <option value="month" ${period === 'month' ? 'selected' : ''}>Last 30 Days</option>
+        </select>
+        <button class="add-btn" id="printReportBtn" style="background:var(--ink)">Print Z-Report</button>
+      </div>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 0 24px 24px;">
+      <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Gross Revenue</div>
+        <div style="font-size: 28px; font-weight: 800; color: var(--ink); margin-top: 8px;">${money(report.totals.sales)}</div>
+        <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">From ${report.totals.orders} sales</div>
+      </div>
+      <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Gross Profit</div>
+        <div style="font-size: 28px; font-weight: 800; color: var(--ok); margin-top: 8px;">${money(profit)}</div>
+        <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">Realized Margin: ${margin}%</div>
+      </div>
+      <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Inventory Value</div>
+        <div style="font-size: 28px; font-weight: 800; color: #1d4ed8; margin-top: 8px;">${money(report.stock?.inventory_value || 0)}</div>
+        <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">Potential Profit: ${money(report.stock?.potential_profit || 0)}</div>
+      </div>
+      <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+        <div style="font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;">Cash in Drawer</div>
+        <div style="font-size: 28px; font-weight: 800; color: #16a34a; margin-top: 8px;">${money(cashTotal)}</div>
+      </div>
+    </div>
+    
+    <div class="sales-table-container">
+      <div style="padding: 16px 20px; font-weight: 700; font-size: 12px; color: var(--muted); text-transform: uppercase; border-bottom: 1px solid var(--line); background: #f8fafc;">TOP MOVERS (BY REVENUE)</div>
+      <table class="sales-table" style="border-top: none;">
+        <thead>
+          <tr>
+            <th>Product Name</th>
+            <th style="text-align: right">Qty Sold</th>
+            <th style="text-align: right">Revenue Generated</th>
+            <th style="text-align: right">Current Stock Left</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(report.top_items || []).map(item => `
+            <tr class="sales-row">
+              <td><strong>${item.name}</strong></td>
+              <td style="text-align: right">${item.qty}</td>
+              <td style="text-align: right; font-weight: 700; color: var(--primary-dark)">${money(item.sales)}</td>
+              <td style="text-align: right">
+                <span class="pay-badge" style="${item.current_stock > 10 ? 'background:#dcfce7;color:#16a34a;' : 'background:#fee2e2;color:#dc2626;'}">
+                  ${item.current_stock || 0} left
+                </span>
+              </td>
+            </tr>
+          `).join('') || `<tr><td colspan="4" class="empty" style="text-align:center; padding: 40px;">No sales data for this period</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+  
+  qs('#reportPeriod').addEventListener('change', (e) => renderReports(e.target.value));
+  qs('#printReportBtn').addEventListener('click', () => {
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html><head><style>
+        body { font-family: monospace; font-size: 12px; margin: 0; padding: 20px; width: 300px; }
+        .text-center { text-align: center; }
+        .flex { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        h2 { margin: 0 0 5px 0; font-size: 16px; }
+        hr { border-top: 1px dashed black; border-bottom: none; margin: 10px 0; }
+      </style></head><body>
+        <div class="text-center">
+          <h2>NIGHTCLUB POS</h2>
+          <p style="margin:0">Z-REPORT (${period.toUpperCase()})</p>
+        </div>
+        <hr>
+        <div class="flex"><span>TOTAL SALES:</span> <strong>${money(report.totals.sales)}</strong></div>
+        <div class="flex"><span>GROSS PROFIT:</span> <strong>${money(profit)}</strong></div>
+        <div class="flex"><span>PROFIT MARGIN:</span> <strong>${margin}%</strong></div>
+        <hr>
+        <div class="flex"><span>M-PESA TOTAL:</span> <span>${money(mpesaTotal)}</span></div>
+        <div class="flex"><span>CASH TOTAL:</span> <span>${money(cashTotal)}</span></div>
+        <hr>
+        <div class="text-center"><p>Printed: ${new Date().toLocaleString()}</p></div>
+        <script>window.print(); window.close();</script>
+      </body></html>
+    `);
+  });
+}
+
+function categoryName(id) {
+  return state.categories.find(c => c.id === id)?.name || 'Products';
+}
+
+// ── Settings Page ─────────────────────────────────────────────────────────────
+async function renderSettings() {
+  const root = qs('[data-page="settings"]');
+  if (!root) return;
+
+  const activeType = state.settings?.business_type || 'bar';
+  const profilesList = Object.entries(state.profiles || {});
+  const curTheme = document.documentElement.getAttribute('data-theme') || localStorage.getItem('pos_theme') || 'light';
+
+  root.innerHTML = `
+    <div class="settings-container" style="max-width: 1040px; margin: 0 auto; padding: 24px;">
+      <div class="settings-header" style="margin-bottom: 24px;">
+        <h2 style="font-size:26px; font-weight:800; color:var(--ink); margin:0 0 6px;">Business Settings & Profiles</h2>
+        <p style="color:var(--muted); font-size:14px; margin:0;">
+          Select your shop category and appearance preferences below. Each business profile enables tailored features (tables, barcodes, expiry dates, variants, quotes) and loads its dedicated product catalog without deleting your existing sales.
+        </p>
+      </div>
+
+      <!-- ── Appearance & Theme Preference ────────────────────────────────── -->
+      <div class="settings-section" style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:24px;">
+        <div class="section-title" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:24px;">🎨</span>
+            <div>
+              <h3 style="margin:0; font-size:18px; color:var(--ink); font-weight:700;">Appearance & Theme</h3>
+              <span style="font-size:13px; color:var(--muted);">Select your preferred display theme</span>
+            </div>
+          </div>
+          <span style="background:var(--bg); color:var(--ink); font-size:12px; font-weight:700; padding:4px 12px; border-radius:20px; border:1px solid var(--line);">
+            Active: ${curTheme === 'dark' ? '🌙 Dark Mode' : '☀️ Light Mode'}
+          </span>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px;">
+          <!-- Light Theme Card -->
+          <div id="themeCardLight" class="theme-card ${curTheme === 'light' ? 'selected' : ''}" style="background:#ffffff; border:2px solid ${curTheme === 'light' ? '#18181b' : '#e4e4e7'}; border-radius:12px; padding:18px; cursor:pointer; transition:all 0.2s ease; box-shadow: ${curTheme === 'light' ? '0 0 0 1px #18181b, 0 4px 12px rgba(0,0,0,0.06)' : '0 1px 3px rgba(0,0,0,0.05)'};">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:30px;">☀️</span>
+                <div>
+                  <h4 style="margin:0; font-size:16px; font-weight:700; color:#09090b;">Light Theme (Default)</h4>
+                  <span style="font-size:12px; color:#71717a;">Clean, high-contrast, modern POS</span>
+                </div>
+              </div>
+              ${curTheme === 'light' ? '<span style="background:#18181b; color:#ffffff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px;">ACTIVE</span>' : ''}
+            </div>
+            <p style="font-size:12px; color:#71717a; margin:4px 0 14px; line-height:1.4;">
+              Crisp white surfaces, deep solid black typography, and neutral grey borders. Clean, fast, and high-contrast.
+            </p>
+            <button type="button" style="width:100%; font-size:12px; font-weight:700; padding:10px; border-radius:8px; cursor:pointer; border:1px solid ${curTheme === 'light' ? '#18181b' : '#e4e4e7'}; background:${curTheme === 'light' ? '#18181b' : '#f4f4f5'}; color:${curTheme === 'light' ? '#ffffff' : '#09090b'}; transition:all 0.15s ease;">
+              ${curTheme === 'light' ? '✓ Currently Active' : 'Switch to Light Theme'}
+            </button>
+          </div>
+
+          <!-- Dark Theme Card -->
+          <div id="themeCardDark" class="theme-card ${curTheme === 'dark' ? 'selected' : ''}" style="background:#18181b; border:2px solid ${curTheme === 'dark' ? '#ffffff' : '#27272a'}; border-radius:12px; padding:18px; cursor:pointer; transition:all 0.2s ease; box-shadow: ${curTheme === 'dark' ? '0 0 0 1px #ffffff, 0 8px 24px rgba(0,0,0,0.5)' : '0 4px 12px rgba(0,0,0,0.3)'};">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:30px;">🌙</span>
+                <div>
+                  <h4 style="margin:0; font-size:16px; font-weight:700; color:#fafafa;">Dark Theme</h4>
+                  <span style="font-size:12px; color:#a1a1aa;">Zinc & charcoal dark mode</span>
+                </div>
+              </div>
+              ${curTheme === 'dark' ? '<span style="background:#ffffff; color:#09090b; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px;">ACTIVE</span>' : ''}
+            </div>
+            <p style="font-size:12px; color:#a1a1aa; margin:4px 0 14px; line-height:1.4;">
+              Deep zinc and pure black surfaces with crisp white text. No purple tints, built for low-light night shifts.
+            </p>
+            <button type="button" style="width:100%; font-size:12px; font-weight:700; padding:10px; border-radius:8px; cursor:pointer; border:1px solid ${curTheme === 'dark' ? '#ffffff' : '#3f3f46'}; background:${curTheme === 'dark' ? '#ffffff' : '#27272a'}; color:${curTheme === 'dark' ? '#09090b' : '#fafafa'}; transition:all 0.15s ease;">
+              ${curTheme === 'dark' ? '✓ Currently Active' : 'Switch to Dark Theme'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Shop Category Selector ──────────────────────────────────────── -->
+      <div class="settings-section" style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:24px;">
+        <div class="section-title" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:24px;">🏢</span>
+            <div>
+              <h3 style="margin:0; font-size:18px; color:var(--ink); font-weight:700;">Choose Shop Category</h3>
+              <span style="font-size:13px; color:var(--muted);">Click any shop profile to switch instantly</span>
+            </div>
+          </div>
+          <span style="background:var(--bg); color:var(--ink); font-size:12px; font-weight:700; padding:4px 12px; border-radius:20px; border:1px solid var(--line);">
+            Current: ${state.profile?.name || activeType}
+          </span>
+        </div>
+
+        <div class="profile-cards-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px;">
+          ${profilesList.map(([key, prof]) => {
+            const isActive = key === activeType;
+            return `
+              <div class="profile-card ${isActive ? 'selected' : ''}" data-type="${key}" style="background:${isActive ? 'var(--primary-light)' : 'var(--panel)'}; border:2px solid ${isActive ? 'var(--primary)' : 'var(--line)'}; border-radius:12px; padding:18px; cursor:pointer; transition:all 0.2s ease; display:flex; flex-direction:column; justify-content:space-between;">
+                <div>
+                  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                      <span style="font-size:32px;">${prof.icon}</span>
+                      <div>
+                        <h4 style="margin:0; font-size:16px; font-weight:700; color:var(--ink);">${prof.name}</h4>
+                        <span style="font-size:12px; color:var(--muted);">${prof.tagline || prof.description || ''}</span>
+                      </div>
+                    </div>
+                    ${isActive ? `<span style="background:var(--primary); color:#fff; font-size:11px; font-weight:800; padding:3px 8px; border-radius:12px;">ACTIVE</span>` : ''}
+                  </div>
+                  <div class="profile-caps" style="display:flex; flex-wrap:wrap; gap:5px; margin:12px 0;">
+                    ${(prof.capabilities ? Object.entries(prof.capabilities).filter(([k,v]) => v === true).slice(0, 5) : []).map(([k]) => `<span class="cap-pill" style="font-size:11px; padding:3px 8px; border-radius:6px; background:var(--bg); color:var(--muted); border:1px solid var(--line);">✓ ${k.replace(/_/g, ' ')}</span>`).join('')}
+                  </div>
+                </div>
+                <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
+                  <span style="font-size:12px; color:var(--muted);">${prof.item_label || 'Products'} Catalog</span>
+                  <button type="button" class="switch-profile-btn ${isActive ? 'secondary' : 'primary'}" data-type="${key}" style="font-size:12px; padding:6px 14px; border-radius:6px; cursor:pointer;">
+                    ${isActive ? '✓ Selected' : 'Switch to this Shop →'}
+                  </button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+
+      <form id="settingsForm" class="settings-section" style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:24px;">
+        <div class="section-title" style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
+          <span style="font-size:22px;">🏪</span>
+          <h3 style="margin:0; font-size:18px; color:var(--ink); font-weight:700;">Store Information & Receipt Settings</h3>
+        </div>
+
+        <input type="hidden" name="business_type" id="settingsBusinessType" value="${activeType}">
+
+        <div class="form-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:16px;">
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Store / Business Name *</label>
+            <input class="field" name="business_name" id="settingsBusinessName" value="${state.settings?.business_name || ''}" required style="width:100%;">
+          </div>
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Tagline / Subtitle</label>
+            <input class="field" name="business_tagline" value="${state.settings?.business_tagline || ''}" style="width:100%;">
+          </div>
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Phone Number</label>
+            <input class="field" name="phone" value="${state.settings?.phone || ''}" style="width:100%;">
+          </div>
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Store Address</label>
+            <input class="field" name="address" value="${state.settings?.address || ''}" style="width:100%;">
+          </div>
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Currency Code</label>
+            <input class="field" name="currency" value="${state.settings?.currency || 'KES'}" style="width:100%;">
+          </div>
+          <div class="form-group">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Tax Rate % (VAT)</label>
+            <input class="field" name="tax_rate" type="number" step="0.1" value="${state.settings?.tax_rate || 16.0}" style="width:100%;">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--muted);">Receipt Footer Note</label>
+            <textarea class="field" name="receipt_footer" rows="2" style="width:100%; padding:8px;">${state.settings?.receipt_footer || ''}</textarea>
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:24px; padding-top:16px; border-top:1px solid var(--line); flex-wrap:wrap; gap:12px;">
+          <button type="button" id="seedCatalogBtn" class="secondary" style="display:flex; align-items:center; gap:8px; padding:10px 16px;">
+            <span>📦</span> Re-load Sample Products for ${state.profile?.name || activeType}
+          </button>
+          <button type="submit" class="primary" id="saveSettingsBtn" style="padding:10px 24px; font-weight:700;">
+            Save Store Info
+          </button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  // Theme switch handlers
+  const setTheme = (theme) => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('pos_theme', theme);
+    const themeBtn = qs('#themeToggleBtn');
+    if (themeBtn) {
+      themeBtn.textContent = theme === 'dark' ? '☀️' : '🌙';
+      themeBtn.title = theme === 'dark' ? 'Switch to Light Theme' : 'Switch to Dark Theme';
+    }
+    renderSettings();
+  };
+
+  qs('#themeCardLight', root)?.addEventListener('click', () => setTheme('light'));
+  qs('#themeCardDark', root)?.addEventListener('click', () => setTheme('dark'));
+
+  // 1-Click Profile switch handler
+  qsa('.profile-cards-grid .profile-card, .profile-cards-grid .switch-profile-btn', root).forEach(el => {
+    el.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const targetCard = el.closest('.profile-card');
+      if (!targetCard) return;
+      const type = targetCard.dataset.type;
+      if (!type || type === activeType) return;
+
+      const prof = state.profiles[type];
+      try {
+        toast(`Switching to ${prof?.name || type}...`, 'info');
+        const updated = await api('/api/settings', {
+          method: 'POST',
+          body: {
+            business_type: type,
+            business_name: prof?.name || type,
+            business_tagline: prof?.tagline || '',
+          }
+        });
+        state.settings = updated.settings;
+        state.profile = updated.profile;
+        state.capabilities = updated.capabilities;
+        toast(`Switched to ${prof?.name || type}!`, 'success');
+        await bootstrap();
+        updateHeaderAndNav();
+        await renderSettings();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+  });
+
+  // Sample catalog loader
+  qs('#seedCatalogBtn', root)?.addEventListener('click', async () => {
+    const selectedType = activeType;
+    const profileName = state.profiles[selectedType]?.name || selectedType;
+    if (!confirm(`Reload sample products with images for ${profileName}? (Existing items will NOT be deleted).`)) return;
+
+    try {
+      const res = await api('/api/seed-samples', {
+        method: 'POST',
+        body: { profile_id: selectedType }
+      });
+      toast(`Loaded sample products for ${profileName}!`, 'success');
+      await bootstrap();
+      await renderSettings();
+    } catch(err) {
+      toast('Failed to load sample products: ' + err.message, 'error');
+    }
+  });
+
+  // Settings form submission
+  qs('#settingsForm', root)?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = qs('#saveSettingsBtn', root);
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+
+    const fd = new FormData(e.target);
+    const data = Object.fromEntries(fd.entries());
+
+    try {
+      const updated = await api('/api/settings', { method: 'POST', body: data });
+      state.settings = updated.settings;
+      state.profile = updated.profile;
+      state.capabilities = updated.capabilities;
+      toast('Store settings saved successfully!', 'success');
+      await bootstrap();
+      updateHeaderAndNav();
+      await renderSettings();
+    } catch (err) {
+      toast(err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Save Store Info';
+    }
+  });
+}
+
+let bootstrapped = false;
+
+async function renderPage(pageDef) {
+  // Swap the <main> content
+  const main = qs('main');
+  if (!main) return;
+  main.innerHTML = `<section class="${pageDef.shell}" data-page="${pageDef.page}"></section>`;
+
+  // Update page title
+  const storeName = state.settings?.business_name || 'POS System';
+  document.title = `${pageDef.title} — ${storeName}`;
+
+  // Update active nav link
+  qsa('.nav-link').forEach(link => {
+    link.classList.toggle('active', link.textContent.trim() === pageDef.active);
+  });
+
+  // Bootstrap data once (categories, items, user)
+  if (!bootstrapped) {
+    await bootstrap();
+    bootstrapped = true;
+  }
+
+  // Render the page content
+  const p = pageDef.page;
+  if (p === 'pos')       posLayout();
+  if (p === 'suppliers') await renderSuppliers();
+  if (p === 'sales')     await renderSales();
+  if (p === 'cashier')   await renderCashier();
+  if (p === 'products')  renderProductAdmin();
+  if (p === 'stock')     await renderStock();
+  if (p === 'reports')   await renderReports();
+  if (p === 'settings')  await renderSettings();
+}
+
+async function navigateTo(path, pushState = true) {
+  const pageDef = SPA_PAGES[path];
+  if (!pageDef) { location.href = path; return; }
+  if (pushState) history.pushState(null, '', path);
+  await renderPage(pageDef);
+}
+
+function initSPARouter() {
+  // Intercept all nav-link clicks
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a.nav-link, a.brand');
+    if (!link) return;
+    const href = link.getAttribute('href');
+    if (href && SPA_PAGES[href]) {
+      e.preventDefault();
+      navigateTo(href);
+    }
+  });
+
+  // Handle browser back/forward
+  window.addEventListener('popstate', () => {
+    const path = location.pathname;
+    if (SPA_PAGES[path]) {
+      navigateTo(path, false);
+    }
+  });
+}
+
+// ── Entry Point ───────────────────────────────────────────────────────────────
+async function start() {
+  const page = pageName();
+  if (!page) return;
+  await bootstrap();
+  bootstrapped = true;
+  if (page === 'pos')       posLayout();
+  if (page === 'suppliers') await renderSuppliers();
+  if (page === 'sales')     await renderSales();
+  if (page === 'cashier')   await renderCashier();
+  if (page === 'products')  renderProductAdmin();
+  if (page === 'stock')     await renderStock();
+  if (page === 'reports')   await renderReports();
+  if (page === 'settings')  await renderSettings();
+
+  // Initialize SPA router after first page render
+  initSPARouter();
+}
+
+start().catch(renderShellError);
