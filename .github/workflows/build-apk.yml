@@ -30,27 +30,51 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('capacitor/package-lock.json') }}
+          key: npm-${{ runner.os }}-${{ hashFiles('capacitor/package.json') }}
           restore-keys: |
             npm-${{ runner.os }}-
 
-      - name: Install Capacitor dependencies
+      - name: Install Capacitor and SQLite dependencies
         working-directory: capacitor
-        run: npm ci
+        run: npm install
+
+      - name: Build local SQLite bridge
+        working-directory: capacitor
+        run: npm run build:bridge
 
       - name: Add Android platform
         working-directory: capacitor
         run: npx cap add android
 
-      - name: Sync Capacitor
+      - name: Sync Capacitor and native plugins
         working-directory: capacitor
         run: npx cap sync android
+
+      - name: Enable Android internet, cleartext API and camera access
+        working-directory: capacitor/android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/AndroidManifest.xml')
+          s = p.read_text()
+          for perm in ['android.permission.INTERNET', 'android.permission.CAMERA']:
+              line = f'<uses-permission android:name="{perm}" />'
+              if line not in s:
+                  s = s.replace('<application', line + '\n    <application', 1)
+          if 'android:usesCleartextTraffic=' not in s:
+              s = s.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
+          p.write_text(s)
+          print(p.read_text())
+          PY
 
       - name: Build debug APK
         working-directory: capacitor/android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
+
+      - name: Verify APK exists
+        run: test -s capacitor/android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
