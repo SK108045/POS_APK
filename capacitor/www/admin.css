@@ -853,3 +853,19 @@ html, body {
 .promo-queue-row:last-child { border-bottom: 0; }
 .promo-queue-phone { color: var(--muted); font-size: 12px; margin-top: 3px; }
 @media (max-width: 900px) { .promo-grid { grid-template-columns: 1fr; } }
+
+
+/* ── APK admin mobile hardening ──────────────────────────────────────────── */
+html, body { max-width: 100%; overflow-x: hidden; }
+.admin-shell, .main-content, .content-section { min-width: 0; max-width: 100%; }
+@media (max-width: 860px) {
+  .sidebar { width: min(86vw, 320px); max-width: 320px; }
+  .main-content { width: 100%; max-width: 100vw; }
+  .content-section { width: 100%; max-width: 100%; overflow-x: hidden; }
+  .stats-grid { grid-template-columns: 1fr !important; }
+  .page-header { gap: 12px; align-items: flex-start; }
+  .page-header, .panel, .two-col, .promo-grid { min-width: 0; max-width: 100%; }
+  .panel-body { min-width: 0; overflow-x: auto; }
+  .toast-container { left: 12px; right: 12px; bottom: 12px; }
+  .toast { min-width: 0; width: 100%; }
+}

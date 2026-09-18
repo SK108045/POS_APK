@@ -2285,6 +2285,43 @@ function renderProductAdminGrid() {
 }
 
 // ── Online Image Search Modal ────────────────────────────────────────────────
+
+async function searchOnlineProductImages(query, limit = 6) {
+  const q = String(query || '').trim();
+  if (!q) return { images: [], results: [] };
+  if (!navigator.onLine) throw new Error('Image search needs an internet connection.');
+
+  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(q)}&page_size=${Math.max(1, Math.min(limit, 12))}`;
+  let payload;
+  if (window.OraforgeHttp?.request) {
+    const response = await window.OraforgeHttp.request({
+      url,
+      method: 'GET',
+      headers: { Accept: 'application/json' }
+    });
+    payload = response.data;
+    if (typeof payload === 'string') payload = JSON.parse(payload);
+  } else {
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`Image search failed (${response.status})`);
+    payload = await response.json();
+  }
+
+  const images = (payload?.results || []).map(item => {
+    const thumb = item.thumbnail || item.url;
+    const full = item.url || thumb;
+    return {
+      thumb,
+      thumbnail: thumb,
+      full,
+      url: full,
+      title: item.title || q,
+      source: 'Openverse'
+    };
+  }).filter(item => item.thumb && item.full);
+  return { query: q, images, results: images };
+}
+
 function showImageSearchModal(query, onSelect) {
   const overlay = document.createElement('div');
   overlay.className = 'qty-popup-overlay';
@@ -2299,7 +2336,7 @@ function showImageSearchModal(query, onSelect) {
         <button class="modal-close" id="imgModalClose" style="background:none; border:none; font-size:24px; color:var(--muted); cursor:pointer; line-height:1;">&times;</button>
       </div>
       <p style="font-size:12px; color:var(--muted); margin:0 0 14px; line-height:1.4;">
-        Finds the single best matching product photo online. Click <strong>Use This Image</strong> to download and optimize it locally with Pillow.
+        Searches Openverse directly from the phone. Select an image to use its online URL for this product.
       </p>
       
       <div style="display:flex; gap:8px; margin-bottom:14px;">
@@ -2339,7 +2376,7 @@ function showImageSearchModal(query, onSelect) {
     statusEl.textContent = '';
 
     try {
-      const data = await api(`/api/product/image-search?q=${encodeURIComponent(q)}&limit=1`);
+      const data = await searchOnlineProductImages(q, 6);
       searchBtn.disabled = false;
       searchBtn.textContent = 'Search';
 
@@ -2377,29 +2414,10 @@ function showImageSearchModal(query, onSelect) {
         </div>
       `;
 
-      resultsBox.querySelector('#useThisImgBtn')?.addEventListener('click', async () => {
-        const btn = resultsBox.querySelector('#useThisImgBtn');
-        btn.disabled = true;
-        btn.textContent = 'Optimizing and saving with Pillow...';
-        statusEl.innerHTML = `<span style="color:var(--primary); font-weight:700;">Processing with Pillow...</span>`;
-
-        try {
-          const saved = await api('/api/product/save-image', {
-            method: 'POST',
-            body: { image_url: imgUrl, name: q }
-          });
-          if (saved.local_url) {
-            onSelect(saved.local_url);
-            toast('Image saved & optimized!', 'success');
-            close();
-          } else {
-            throw new Error('Image save failed');
-          }
-        } catch(err) {
-          statusEl.innerHTML = `<span style="color:var(--danger); font-weight:700;">Failed to download: ${err.message}</span>`;
-          btn.disabled = false;
-          btn.textContent = '✓ Use This Image';
-        }
+      resultsBox.querySelector('#useThisImgBtn')?.addEventListener('click', () => {
+        onSelect(imgUrl);
+        toast('Online product image selected!', 'success');
+        close();
       });
 
     } catch (err) {

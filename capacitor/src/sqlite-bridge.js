@@ -1,4 +1,4 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { CapacitorSQLite, SQLiteConnection } from '@capacitor-community/sqlite';
 
 class IndexedFallback {
@@ -47,3 +47,24 @@ class OraforgeDB {
 
 window.OraforgeDB = new OraforgeDB();
 window.OraforgeDBReady = window.OraforgeDB.init();
+
+
+window.OraforgeHttp = {
+  async request({ url, method = 'GET', headers = {}, data = null, params = null, connectTimeout = 10000, readTimeout = 15000 }) {
+    const options = { url, method, headers, connectTimeout, readTimeout };
+    if (data !== null && data !== undefined) options.data = data;
+    if (params) options.params = params;
+    const response = await CapacitorHttp.request(options);
+    if (response.status < 200 || response.status >= 300) {
+      let message = `Network request failed (${response.status})`;
+      const payload = response.data;
+      if (payload && typeof payload === 'object') message = payload.error || payload.message || message;
+      else if (typeof payload === 'string' && payload.trim()) message = payload.slice(0, 180);
+      const error = new Error(message);
+      error.status = response.status;
+      error.data = payload;
+      throw error;
+    }
+    return response;
+  }
+};
